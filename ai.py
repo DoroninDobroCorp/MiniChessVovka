@@ -1,0 +1,1017 @@
+# --- Imports and Constants ---
+import sqlite3
+import time
+import copy
+import random
+import math
+import multiprocessing
+import pickle # For deep copying complex objects like GameState
+import hashlib
+import traceback
+from utils import format_move_for_print, algebraic_to_coords
+
+BOARD_SIZE = 6
+EMPTY_SQUARE = '--'
+
+# Piece values (example, adjust as needed)
+# Increased difference between pieces
+PIECE_VALUES = {'P': 100, 'N': 350, 'B': 360, 'R': 550, 'K': 10000}
+HAND_PIECE_VALUES = {'P': 110, 'N': 385, 'B': 395, 'R': 605} # Slightly more valuable in hand?
+
+# --- Game Phase Constants ---
+OPENING_PHASE = 0
+ENDGAME_PHASE = 1 # Simplified: endgame if few pieces left
+
+# --- Piece Square Tables (Simplified Example - More bonus for center) ---
+# Bonus for controlling center squares (e.g., c3, d3, c4, d4 in standard)
+# Indices for a 6x6 board need adjustment. Let's assume center is roughly rows 2,3 and cols 2,3
+# (0,0) top-left -> (5,5) bottom-right
+CENTER_SQUARES = [(2, 2), (2, 3), (3, 2), (3, 3)]
+CENTER_BONUS = 10 # Bonus points per piece in center
+KING_SAFETY_BONUS = 5 # Small bonus for pieces near king
+MOBILITY_BONUS = 2 # Bonus per legal move
+PAWN_STRUCTURE_BONUS = 3 # Bonus for connected pawns (simple check)
+
+# --- Transposition Table (Now a simple Move Cache) ---
+# Stores: {position_hash: best_move_repr}
+move_cache = {}
+
+# --- Database Handling for Move Cache ---
+DB_PATH = "move_cache.db" # Renamed DB file
+
+# --- Configuration ---
+CACHE_ENABLED = True
+# How many worker processes to use for parallel search
+# Use None to let multiprocessing decide (usually number of CPU cores)
+NUM_WORKERS = None
+
+# --- Constants ---
+CHECKMATE_SCORE = 1000000 # Large score for checkmate
+STALEMATE_SCORE = 0       # Score for stalemate
+MAX_QUIESCENCE_DEPTH = 2  # Limit quiescence search depth
+
+def setup_db():
+    """Creates the move_cache table if it doesn't exist."""
+    try:
+        conn = sqlite3.connect(DB_PATH) # No timeout needed for simple ops
+        cursor = conn.cursor()
+        # Simplified schema: hash -> best_move representation
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS move_cache (
+                hash TEXT PRIMARY KEY,
+                best_move_repr TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+        print(f"Database {DB_PATH} checked/created successfully.")
+    except Exception as e:
+        print(f"Error setting up database: {e}")
+
+def load_move_cache_from_db():
+    """Loads the move cache from the SQLite database."""
+    global move_cache
+    setup_db() # Ensure DB and table exist
+    loaded_count = 0
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT hash, best_move_repr FROM move_cache")
+        rows = cursor.fetchall()
+        move_cache = {row[0]: row[1] for row in rows}
+        loaded_count = len(move_cache)
+        conn.close()
+        print(f"Loaded {loaded_count} entries from move cache database.")
+    except Exception as e:
+        print(f"Error loading move cache from database: {e}")
+        move_cache = {} # Start with empty cache on error
+
+def save_move_cache_to_db(cache_to_save):
+    """Saves the current move cache to the SQLite database."""
+    print(f"Attempting to save {len(cache_to_save)} cache entries...")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        # Use INSERT OR REPLACE to update existing entries or insert new ones
+        entries_to_save = list(cache_to_save.items())
+        cursor.executemany("INSERT OR REPLACE INTO move_cache (hash, best_move_repr) VALUES (?, ?)", entries_to_save)
+        conn.commit()
+        conn.close()
+        print(f"Successfully saved {len(entries_to_save)} entries to move cache database.")
+    except Exception as e:
+        print(f"Error saving move cache to database: {e}")
+
+
+# --- Game State Import ---
+# Import the actual GameState class and necessary constants
+try:
+    from gamestate import GameState # Import GameState class
+    from pieces import KING, PAWN, PROMOTION_PIECES_WHITE_STR, PROMOTION_PIECES_BLACK_STR # Import constants
+except ImportError:
+    print("Warning: gamestate.py or pieces.py not found. Using dummy GameState.")
+    # Define a basic dummy class for structure
+    class GameState:
+        def __init__(self):
+            self.board = [[EMPTY_SQUARE for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+            self.current_turn = 'w'
+            self.white_hand = {}
+            self.black_hand = {}
+            self.white_king_pos = None
+            self.black_king_pos = None
+            self.checkmate = False
+            self.stalemate = False
+            self.move_log = []
+            self.needs_promotion_choice = False
+            self.promotion_square = None
+            self.en_passant_target = None # For hashing
+            self.castling_rights = '----' # For hashing
+
+        def get_all_legal_moves(self): return []
+        def make_move(self, move, is_check_game_over=True): return False
+        def complete_promotion(self, piece): return False
+        def is_in_check(self): return False
+        def get_piece_locations(self, color): return []
+        def get_piece(self, r, c): return None
+        def is_move_legal(self, move): # Added stub for cache check
+             return move in self.get_all_legal_moves()
+
+
+    KING = 'k'
+    PAWN = 'p'
+    PROMOTION_PIECES_WHITE_STR = "QRN" # Example
+    PROMOTION_PIECES_BLACK_STR = "qrn" # Example
+
+
+# --- Helper Functions ---
+def get_piece_color(piece):
+    """Returns the color of the piece ('w' or 'b') or None if empty."""
+    if piece == EMPTY_SQUARE or piece is None:
+        return None
+    return 'w' if piece.isupper() else 'b'
+
+def get_opposite_color(color):
+    """Returns the opposite color."""
+    return 'b' if color == 'w' else 'w'
+
+def get_position_hash(gamestate: GameState):
+    """Generates a unique and STABLE hash for the current game state including hands and turn.
+
+       Handles potential missing attributes gracefully.
+       Uses SHA256 for stability across runs.
+    """
+    try:
+        board_tuple = tuple(''.join(row) for row in gamestate.board)
+        # Hands are explicitly sorted for consistency
+        white_hand_tuple = tuple(sorted(gamestate.hands.get('w', {}).items()))
+        black_hand_tuple = tuple(sorted(gamestate.hands.get('b', {}).items()))
+        turn = gamestate.current_turn
+        # Use getattr for attributes that might be missing in some states/copies
+        # Ensure consistent defaults (e.g., None or specific string)
+        en_passant = getattr(gamestate, 'en_passant_target', None)
+        # Castling rights format needs to be consistent
+        castling_w_k = getattr(gamestate, 'can_castle_white_kingside', False)
+        castling_w_q = getattr(gamestate, 'can_castle_white_queenside', False)
+        castling_b_k = getattr(gamestate, 'can_castle_black_kingside', False)
+        castling_b_q = getattr(gamestate, 'can_castle_black_queenside', False)
+        castling = (castling_w_k, castling_w_q, castling_b_k, castling_b_q)
+
+        # Combine all relevant state information into a tuple
+        state_tuple = (board_tuple, white_hand_tuple, black_hand_tuple, turn, en_passant, castling)
+
+        # Convert tuple to a string representation for hashing
+        # Using repr() is generally safe and stable for tuples of primitives/basic types
+        state_string = repr(state_tuple)
+
+        # Calculate SHA256 hash
+        hasher = hashlib.sha256()
+        hasher.update(state_string.encode('utf-8')) # Hash the UTF-8 encoded string
+        stable_hash = hasher.hexdigest() # Get the hex representation of the hash
+
+        return stable_hash
+    except Exception as e:
+        print(f"[ERROR] Failed to generate hash: {e}")
+        traceback.print_exc() # <--- Теперь traceback определен
+        # Return a default or error hash to avoid crashing, though moves won't cache
+        return "error_hash"
+
+
+# --- Evaluation Function ---
+def evaluate_position(gamestate: GameState):
+    """
+    Evaluates the current board position based on material, piece positions,
+    king safety, mobility, and pawn structure.
+    Returns a score (positive for white advantage, negative for black).
+    """
+    if gamestate.checkmate:
+        return -float('inf') if gamestate.current_turn == 'w' else float('inf')
+    if gamestate.stalemate:
+        # --- Stalemate Evaluation based on Material ---
+        white_material = 0
+        black_material = 0
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                piece = gamestate.board[r][c]
+                if piece != EMPTY_SQUARE:
+                    value = PIECE_VALUES.get(piece.upper(), 0)
+                    if get_piece_color(piece) == 'w': white_material += value
+                    else: black_material += value
+        for piece, count in gamestate.hands.get('w', {}).items():
+             white_material += HAND_PIECE_VALUES.get(piece.upper(), 0) * count
+        for piece, count in gamestate.hands.get('b', {}).items():
+             black_material += HAND_PIECE_VALUES.get(piece.upper(), 0) * count
+
+        material_diff = white_material - black_material
+        # If white has advantage and it's white's turn (stalemate for black), it's bad for white.
+        if gamestate.current_turn == 'w' and material_diff > 100: return -10000 # White failed to win
+        # If black has advantage and it's black's turn (stalemate for white), it's bad for black.
+        elif gamestate.current_turn == 'b' and material_diff < -100: return 10000 # Black failed to win
+        # Otherwise, treat stalemate as close to zero (drawish)
+        else: return 0
+
+    score = 0
+    white_king_pos = gamestate.king_pos.get('w')
+    black_king_pos = gamestate.king_pos.get('b')
+    white_king_r, white_king_c = white_king_pos if white_king_pos else (-1,-1)
+    black_king_r, black_king_c = black_king_pos if black_king_pos else (-1,-1)
+    total_material = 0 # For phase detection
+
+    # 1. Material Count & Basic Piece Positions
+    white_pawns = []
+    black_pawns = []
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            piece = gamestate.board[r][c]
+            if piece != EMPTY_SQUARE:
+                piece_type = piece.upper()
+                piece_color = get_piece_color(piece)
+                value = PIECE_VALUES.get(piece_type, 0)
+                total_material += value
+
+                if piece_color == 'w':
+                    score += value
+                    if (r, c) in CENTER_SQUARES: score += CENTER_BONUS
+                    if piece_type == PAWN: white_pawns.append((r, c))
+                    # King safety bonus (simple: distance)
+                    if white_king_r != -1 and piece_type != KING:
+                         dist = max(abs(r - white_king_r), abs(c - white_king_c))
+                         if dist <= 2: score += KING_SAFETY_BONUS
+                else:
+                    score -= value
+                    if (r, c) in CENTER_SQUARES: score -= CENTER_BONUS
+                    if piece_type == PAWN: black_pawns.append((r, c))
+                     # King safety bonus
+                    if black_king_r != -1 and piece_type != KING:
+                         dist = max(abs(r - black_king_r), abs(c - black_king_c))
+                         if dist <= 2: score -= KING_SAFETY_BONUS
+
+    # Add hand material value
+    for piece, count in gamestate.hands.get('w', {}).items():
+        score += HAND_PIECE_VALUES.get(piece.upper(), 0) * count
+        total_material += PIECE_VALUES.get(piece.upper(), 0) * count # Use board value for phase
+    for piece, count in gamestate.hands.get('b', {}).items():
+        score -= HAND_PIECE_VALUES.get(piece.upper(), 0) * count
+        total_material += PIECE_VALUES.get(piece.upper(), 0) * count
+
+    # Determine game phase (simplified)
+    # Less than ~2 Rooks worth of material left besides kings? Consider it endgame.
+    phase = ENDGAME_PHASE if total_material < (2 * PIECE_VALUES['R'] + 2*PIECE_VALUES['K']) else OPENING_PHASE
+
+    # 2. Mobility (simple count of legal moves) - potentially expensive
+    # white_moves = len(gamestate.get_valid_moves_for_color('w')) # Assuming this function exists
+    # black_moves = len(gamestate.get_valid_moves_for_color('b')) # Assuming this function exists
+    # score += (white_moves - black_moves) * MOBILITY_BONUS
+
+    # 3. Pawn Structure (very simple: connected pawns)
+    for r, c in white_pawns:
+        # Check adjacent files for friendly pawns
+        if c > 0 and gamestate.get_piece(r, c-1) == 'P': score += PAWN_STRUCTURE_BONUS
+        if c < BOARD_SIZE-1 and gamestate.get_piece(r, c+1) == 'P': score += PAWN_STRUCTURE_BONUS
+        # Add bonus for passed pawns (no opponent pawns ahead in this or adjacent files) - simplified
+        is_passed = True
+        for scan_r in range(r - 1, -1, -1): # Check rows ahead
+            if gamestate.get_piece(scan_r, c) == 'p': is_passed = False; break
+            if c > 0 and gamestate.get_piece(scan_r, c-1) == 'p': is_passed = False; break
+            if c < BOARD_SIZE-1 and gamestate.get_piece(scan_r, c+1) == 'p': is_passed = False; break
+        if is_passed: score += (BOARD_SIZE - 1 - r) * 10 # Bonus increases closer to promotion
+
+    for r, c in black_pawns:
+        if c > 0 and gamestate.get_piece(r, c-1) == 'p': score -= PAWN_STRUCTURE_BONUS
+        if c < BOARD_SIZE-1 and gamestate.get_piece(r, c+1) == 'p': score -= PAWN_STRUCTURE_BONUS
+        is_passed = True
+        for scan_r in range(r + 1, BOARD_SIZE): # Check rows ahead
+            if gamestate.get_piece(scan_r, c) == 'P': is_passed = False; break
+            if c > 0 and gamestate.get_piece(scan_r, c-1) == 'P': is_passed = False; break
+            if c < BOARD_SIZE-1 and gamestate.get_piece(scan_r, c+1) == 'P': is_passed = False; break
+        if is_passed: score -= r * 10 # Bonus increases closer to promotion
+
+    # 4. King Safety (endgame vs opening)
+    if phase == OPENING_PHASE:
+        # Penalty for king being too exposed (e.g., in center) - Needs better logic
+        if (white_king_r, white_king_c) in CENTER_SQUARES: score -= 20
+        if (black_king_r, black_king_c) in CENTER_SQUARES: score += 20
+    else: # Endgame
+        # Bonus for king being active / closer to center
+        if (white_king_r, white_king_c) in CENTER_SQUARES: score += 10
+        if (black_king_r, black_king_c) in CENTER_SQUARES: score -= 10
+
+    # Add a small random element to avoid identical choices? (Optional)
+    # score += random.uniform(-0.1, 0.1)
+
+    return score
+
+
+# --- Quiescence Search ---
+def get_noisy_moves(gamestate: GameState):
+    """ Get captures, promotions, maybe checks? """
+    moves = gamestate.get_all_legal_moves()
+    noisy_moves = []
+    for move in moves:
+        # Check if it's a capture
+        is_capture = False
+        if move[0] == 'move':
+            end_r, end_c = move[2]
+            if gamestate.board[end_r][end_c] != EMPTY_SQUARE:
+                is_capture = True
+        elif move[0] == 'drop':
+             # Drops are generally less forcing but change material, include them? Maybe.
+             # is_capture = True # Let's consider drops noisy for now
+             pass # Or don't include drops as noisy unless they give check?
+
+        # Check if it's a promotion
+        is_promotion = False
+        if move[0] == 'move':
+            start_r, _ = move[1]
+            end_r, _ = move[2]
+            piece = gamestate.board[start_r][_] # Piece being moved
+            if piece.upper() == PAWN:
+                if (piece == 'P' and end_r == 0) or (piece == 'p' and end_r == BOARD_SIZE - 1):
+                    is_promotion = True
+
+        # Check if it gives check (more expensive)
+        # gives_check = False
+        # next_state = copy.deepcopy(gamestate)
+        # if next_state.make_move(move, is_check_game_over=False):
+        #      if next_state.is_in_check():
+        #           gives_check = True
+
+        if is_capture or is_promotion: # or gives_check:
+            noisy_moves.append(move)
+    return noisy_moves
+
+
+def quiescence_search(gamestate: GameState, alpha, beta, depth):
+    """ Search only captures and promotions until a quiet position is reached. """
+    if gamestate.checkmate or gamestate.stalemate:
+         return evaluate_position(gamestate)
+
+    stand_pat_score = evaluate_position(gamestate)
+
+    if depth == 0:
+        return stand_pat_score
+
+    # Delta Pruning (simple version): If current eval + big margin < alpha, prune
+    # BIG_MARGIN = PIECE_VALUES['R'] # e.g., value of a rook
+    # if stand_pat_score < alpha - BIG_MARGIN:
+    #      return alpha
+
+    if gamestate.current_turn == 'w': # Maximizing
+        if stand_pat_score >= beta:
+            return beta # Fail high
+        alpha = max(alpha, stand_pat_score)
+
+        noisy_moves = get_noisy_moves(gamestate)
+        # Sort noisy moves? MVV-LVA might be good here too.
+        noisy_moves.sort(key=lambda m: mvv_lva_score(gamestate, m), reverse=True)
+
+        for move in noisy_moves:
+            next_state = copy.deepcopy(gamestate)
+            move_made = next_state.make_move(move, is_check_game_over=False)
+            if not move_made: continue
+            if next_state.needs_promotion_choice:
+                 best_prom_piece = 'Q'
+                 if 'Q' not in PROMOTION_PIECES_WHITE_STR and 'R' in PROMOTION_PIECES_WHITE_STR: best_prom_piece = 'R'
+                 if not next_state.complete_promotion(best_prom_piece): continue
+
+            score = quiescence_search(next_state, alpha, beta, depth - 1)
+            alpha = max(alpha, score)
+            if alpha >= beta:
+                return beta # Fail high (cutoff)
+        return alpha # Best score found for maximizing player
+
+    else: # Minimizing
+        if stand_pat_score <= alpha:
+            return alpha # Fail low
+        beta = min(beta, stand_pat_score)
+
+        noisy_moves = get_noisy_moves(gamestate)
+        noisy_moves.sort(key=lambda m: mvv_lva_score(gamestate, m), reverse=True)
+
+        for move in noisy_moves:
+            next_state = copy.deepcopy(gamestate)
+            move_made = next_state.make_move(move, is_check_game_over=False)
+            if not move_made: continue
+            if next_state.needs_promotion_choice:
+                 best_prom_piece = 'q'
+                 if 'q' not in PROMOTION_PIECES_BLACK_STR and 'r' in PROMOTION_PIECES_BLACK_STR: best_prom_piece = 'r'
+                 if not next_state.complete_promotion(best_prom_piece): continue
+
+            score = quiescence_search(next_state, alpha, beta, depth - 1)
+            beta = min(beta, score)
+            if alpha >= beta:
+                return alpha # Fail low (cutoff)
+        return beta # Best score found for minimizing player
+
+
+# --- MVV-LVA Heuristic ---
+def mvv_lva_score(gamestate, move):
+    """ Assigns a score for move ordering based on Most Valuable Victim - Least Valuable Aggressor. """
+    if move[0] != 'move': return 0 # Only score board moves
+
+    start_sq, end_sq = move[1], move[2]
+    start_r, start_c = start_sq
+    end_r, end_c = end_sq
+
+    aggressor_piece = gamestate.board[start_r][start_c]
+    victim_piece = gamestate.board[end_r][end_c]
+
+    if aggressor_piece == EMPTY_SQUARE: return 0 # Should not happen for legal moves
+
+    aggressor_value = PIECE_VALUES.get(aggressor_piece.upper(), 0)
+
+    if victim_piece != EMPTY_SQUARE:
+        victim_value = PIECE_VALUES.get(victim_piece.upper(), 0)
+        # High score for capturing valuable piece with less valuable one
+        return (victim_value * 10) - aggressor_value
+    else:
+        # Check for promotion
+        is_promotion = False
+        piece_type = aggressor_piece.upper()
+        piece_color = get_piece_color(aggressor_piece)
+        if piece_type == PAWN:
+             if (piece_color == 'w' and end_r == 0) or \
+                (piece_color == 'b' and end_r == BOARD_SIZE - 1):
+                 is_promotion = True
+        if is_promotion:
+             return 900 # Promotions are usually good, score high
+
+    return 0 # Quiet move
+
+
+# --- Minimax with Alpha-Beta (Simplified - No TT logic inside) ---
+def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_player):
+    """
+    Performs minimax search with alpha-beta pruning.
+    Does NOT interact with the move cache directly.
+    Returns: (score, best_move_found_at_this_node)
+    """
+    if depth == 0 or gamestate.checkmate or gamestate.stalemate:
+        q_score = quiescence_search(gamestate, alpha, beta, MAX_QUIESCENCE_DEPTH)
+        return q_score, None
+
+    legal_moves = gamestate.get_all_legal_moves()
+    if not legal_moves:
+        return evaluate_position(gamestate), None
+
+    # Simple move ordering (e.g., MVV-LVA can still be beneficial)
+    move_scores = {move: mvv_lva_score(gamestate, move) for move in legal_moves}
+    legal_moves.sort(key=lambda m: move_scores.get(m, 0), reverse=True)
+
+    best_move_for_depth = None
+    if maximizing_player: # White
+        max_eval = -float('inf')
+        for move in legal_moves:
+            next_state = copy.deepcopy(gamestate)
+            move_made = next_state.make_move(move, is_check_game_over=False)
+            if not move_made: continue
+            if next_state.needs_promotion_choice:
+                 best_prom_piece = 'Q' # Auto-promote to Queen (or Rook)
+                 if 'Q' not in PROMOTION_PIECES_WHITE_STR and 'R' in PROMOTION_PIECES_WHITE_STR: best_prom_piece = 'R'
+                 if not next_state.complete_promotion(best_prom_piece): continue
+
+            eval_score, _ = minimax_alpha_beta(next_state, depth - 1, alpha, beta, False)
+
+            if eval_score > max_eval:
+                max_eval = eval_score
+                best_move_for_depth = move # Store the move that led to max_eval
+            alpha = max(alpha, eval_score)
+            if alpha >= beta:
+                break # Beta cutoff
+        final_score = max_eval
+    else: # Black (Minimizing)
+        min_eval = float('inf')
+        for move in legal_moves:
+            next_state = copy.deepcopy(gamestate)
+            move_made = next_state.make_move(move, is_check_game_over=False)
+            if not move_made: continue
+            if next_state.needs_promotion_choice:
+                 best_prom_piece = 'q' # Auto-promote to queen (or rook)
+                 if 'q' not in PROMOTION_PIECES_BLACK_STR and 'r' in PROMOTION_PIECES_BLACK_STR: best_prom_piece = 'r'
+                 if not next_state.complete_promotion(best_prom_piece): continue
+
+            eval_score, _ = minimax_alpha_beta(next_state, depth - 1, alpha, beta, True)
+
+            if eval_score < min_eval:
+                min_eval = eval_score
+                best_move_for_depth = move # Store the move that led to min_eval
+            beta = min(beta, eval_score)
+            if alpha >= beta:
+                break # Alpha cutoff
+        final_score = min_eval
+
+    # No cache storage here - handled by find_best_move
+    return final_score, best_move_for_depth
+
+
+# --- Worker Function (Simplified - No TT return) ---
+def evaluate_move_worker(args):
+    """
+    Worker function for parallel search. Evaluates a single move.
+    Returns only the score.
+    """
+    move, depth, alpha, beta, is_maximizing, gs_pickle_dump = args
+    try:
+        gamestate_copy = pickle.loads(gs_pickle_dump)
+
+        move_made = gamestate_copy.make_move(move, is_check_game_over=False)
+        if not move_made:
+            return -float('inf') if is_maximizing else float('inf')
+
+        if gamestate_copy.needs_promotion_choice:
+            prom_piece = ''
+            if not is_maximizing: prom_piece = 'q' if 'q' in PROMOTION_PIECES_BLACK_STR else 'r'
+            else: prom_piece = 'Q' if 'Q' in PROMOTION_PIECES_WHITE_STR else 'R'
+            if not gamestate_copy.complete_promotion(prom_piece):
+                 print(f"Error completing auto-promotion in worker for {move}")
+                 return -float('inf') if is_maximizing else float('inf')
+
+        # Call the simplified minimax
+        score, _ = minimax_alpha_beta(gamestate_copy, depth - 1, alpha, beta, not is_maximizing)
+        return score
+
+    except Exception as e:
+        # Log detailed error including the move being processed
+        # traceback.print_exc() # Uncomment for full traceback in worker logs
+        print(f"Error in worker process for move {move}: {type(e).__name__} - {e}")
+        return -float('inf') if is_maximizing else float('inf')
+
+
+# --- Main AI Function (Using Simple Move Cache) ---
+def find_best_move(gamestate: GameState, depth=12): # Changed default depth to 12
+    """
+    Finds the best move using fixed depth search and a simple move cache.
+    Checks cache first, then performs parallel search if needed.
+    """
+    print(f"AI ({gamestate.current_turn}) thinking with fixed depth {depth}...")
+    start_time = time.time()
+    is_maximizing = (gamestate.current_turn == 'w')
+    global move_cache # Access the global cache
+
+    if gamestate.needs_promotion_choice:
+        print("AI Error: Cannot find move, waiting for promotion choice.")
+        return None
+
+    # --- Check Move Cache ---
+    pos_hash = get_position_hash(gamestate)
+    cached_move_repr = move_cache.get(pos_hash)
+    if cached_move_repr:
+        try:
+            # Convert repr back to move tuple/list structure using eval
+            # WARNING: eval() is a security risk if DB content is not trusted.
+            # Consider safer alternatives like custom serialization/deserialization
+            # or storing moves in a JSON-compatible format if needed.
+            cached_move = eval(cached_move_repr)
+
+            # Validate if the cached move is still legal
+            # This requires GameState to have an 'is_move_legal' method
+            if hasattr(gamestate, 'is_move_legal') and gamestate.is_move_legal(cached_move):
+                 print(f"[CACHE HIT] Hash {pos_hash}: Found valid move {cached_move} in cache.")
+                 end_time = time.time()
+                 print(f"AI ({gamestate.current_turn}) finished thinking (CACHE HIT) in {end_time - start_time:.2f}s.")
+                 return cached_move
+            elif not hasattr(gamestate, 'is_move_legal'):
+                 print(f"[CACHE WARN] Hash {pos_hash}: Cannot validate cached move {cached_move} as GameState lacks 'is_move_legal'. Using cached move.")
+                 # If validation isn't possible, maybe return it anyway? Or force recalculation?
+                 # For now, let's return it assuming it's likely still valid.
+                 end_time = time.time()
+                 print(f"AI ({gamestate.current_turn}) finished thinking (CACHE HIT - UNVALIDATED) in {end_time - start_time:.2f}s.")
+                 return cached_move
+            else:
+                 print(f"[CACHE WARN] Hash {pos_hash}: Cached move {cached_move} is no longer legal. Recalculating.")
+                 # Optionally remove the invalid entry
+                 # del move_cache[pos_hash]
+        except Exception as e:
+            print(f"[CACHE ERROR] Hash {pos_hash}: Error processing cached move '{cached_move_repr}': {e}. Recalculating.")
+            # Remove potentially corrupt entry
+            if pos_hash in move_cache: del move_cache[pos_hash]
+
+
+    # --- If not in cache or invalid, perform search ---
+    print(f"[CACHE MISS] Hash {pos_hash}: Position not in cache or invalid. Starting search...")
+    best_score = -float('inf') if is_maximizing else float('inf')
+    best_move = None
+
+    # Need a copy to generate moves without altering the original state passed to minimax/workers
+    gs_copy_for_moves = copy.deepcopy(gamestate)
+    legal_moves = gs_copy_for_moves.get_all_legal_moves()
+
+    if not legal_moves:
+        print("AI Error: No legal moves available!")
+        # Attempt to evaluate terminal state anyway?
+        score = evaluate_position(gamestate)
+        print(f"  Terminal state evaluation: {score}")
+        return None # No move to make
+
+    if len(legal_moves) == 1:
+        print("Only one legal move available.")
+        best_move = copy.deepcopy(legal_moves[0])
+        # Store this single move in the cache
+        move_cache[pos_hash] = repr(best_move)
+        print(f"[CACHE STORE] Hash {pos_hash}: Stored single legal move {repr(best_move)}.")
+        end_time = time.time()
+        print(f"AI ({gamestate.current_turn}) finished thinking (Single Move) in {end_time - start_time:.2f}s.")
+        return best_move
+
+
+    pool = None
+    try:
+        try: num_workers = max(1, multiprocessing.cpu_count() - 1)
+        except NotImplementedError: num_workers = 1
+        print(f"Using {num_workers} worker processes for depth {depth} search.")
+
+        if num_workers <= 1 or len(legal_moves) <= 1:
+            print("Running search in single process.")
+            # Pass the ORIGINAL gamestate, minimax handles copying
+            best_score, best_move = minimax_alpha_beta(gamestate, depth, -float('inf'), float('inf'), is_maximizing)
+        else:
+            # Parallel processing
+            try:
+                # Serialize the ORIGINAL gamestate for workers
+                gs_pickle_dump = pickle.dumps(gamestate)
+            except Exception as dump_error:
+                print(f"FATAL: Could not pickle GameState: {dump_error}. Selecting random.")
+                return random.choice(legal_moves) if legal_moves else None
+
+            # Tasks for simplified workers (depth-1 called inside worker)
+            tasks = [(move, depth, -float('inf'), float('inf'), is_maximizing, gs_pickle_dump)
+                     for move in legal_moves]
+
+            worker_scores = []
+            try:
+                # Use spawn context if available and on non-Windows for better isolation
+                # context = multiprocessing.get_context("spawn") if hasattr(multiprocessing, 'get_context') and os.name != 'nt' else None
+                # pool = multiprocessing.Pool(processes=num_workers, context=context)
+                pool = multiprocessing.Pool(processes=num_workers)
+                worker_scores = pool.map(evaluate_move_worker, tasks) # Get only scores
+                pool.close()
+                pool.join()
+                pool = None # Signal pool is closed
+            except Exception as pool_error:
+                print(f"Error during parallel processing: {pool_error}. Aborting search.")
+                if pool: pool.terminate(); pool.join() # Terminate and wait
+                # Fallback to random move maybe? Or re-raise?
+                return random.choice(legal_moves) if legal_moves else None # Fallback
+
+            if len(worker_scores) == len(legal_moves):
+                move_scores = list(zip(legal_moves, worker_scores))
+                # Find the best move based on scores returned by workers
+                if is_maximizing:
+                    best_move_score_pair = max(move_scores, key=lambda item: item[1])
+                else:
+                    best_move_score_pair = min(move_scores, key=lambda item: item[1])
+                best_move = best_move_score_pair[0]
+                best_score = best_move_score_pair[1] # Store score for info
+            else:
+                print(f"Warning: Mismatch between worker results ({len(worker_scores)}) and legal moves ({len(legal_moves)}). Selecting random.")
+                best_move = random.choice(legal_moves)
+                best_score = 0 # Unknown score
+
+    except Exception as e:
+        print(f"An error occurred during AI move calculation: {e}")
+        # traceback.print_exc() # Uncomment for full traceback
+        print("Selecting a random move as fallback.")
+        best_move = random.choice(legal_moves) if legal_moves else None
+        best_score = 0 # Unknown score
+    finally:
+        # Ensure pool is always terminated if it exists and wasn't closed properly
+        if pool is not None:
+            try:
+                print("Terminating worker pool...")
+                pool.terminate()
+                pool.join()
+            except Exception as pool_cleanup_error:
+                 print(f"Error terminating pool: {pool_cleanup_error}")
+
+
+    end_time = time.time()
+    if best_move:
+        print(f"AI ({gamestate.current_turn}) finished thinking in {end_time - start_time:.2f}s.")
+        print(f"  Chosen Move: {best_move}, Score: {best_score:.2f}")
+        # --- Store result in Move Cache ---
+        # Use repr() for storing the move; requires eval() on load.
+        move_cache[pos_hash] = repr(best_move)
+        print(f"[CACHE STORE] Hash {pos_hash}: Stored move {repr(best_move)}.")
+    else:
+        # This case should ideally not happen if there are legal moves
+        print(f"AI ({gamestate.current_turn}) could not find a best move after {end_time - start_time:.2f}s. Legal moves: {legal_moves}")
+
+    return best_move
+
+# --- Add is_move_legal stub if not present in GameState ---
+# This is crucial for cache validation. Add a basic stub if your GameState lacks it.
+# Ensure GameState is defined before patching
+if 'GameState' in globals() and not hasattr(GameState, 'is_move_legal'):
+     print("Patching GameState with basic is_move_legal stub for cache validation.")
+     def is_move_legal_stub(self, move):
+         # Basic check: generate all legal moves and see if the move is among them.
+         # This might be slow but ensures correctness for the cache.
+         # Make sure get_all_legal_moves doesn't modify the state.
+         try:
+            return move in self.get_all_legal_moves()
+         except Exception as e:
+             print(f"Error during is_move_legal_stub for move {move}: {e}")
+             return False # Assume illegal on error?
+     GameState.is_move_legal = is_move_legal_stub
+
+# --- Initial DB Setup Call ---
+# It's generally better to explicitly call load/save in main.py
+# but ensuring setup runs once might be useful.
+# setup_db() # Let load_move_cache_from_db handle this.
+
+def minimax(gamestate: GameState, depth, move_cache):
+    """Starts the parallel minimax search."""
+    try:
+        start_time_minimax = time.time()
+        legal_moves = gamestate.get_all_legal_moves()
+        if not legal_moves:
+            return None, 0 # Or appropriate score for checkmate/stalemate?
+
+        num_workers = NUM_WORKERS if NUM_WORKERS else multiprocessing.cpu_count()
+        print(f"Using {num_workers} worker processes for depth {depth} search.")
+        pool = multiprocessing.Pool(processes=num_workers)
+        manager = multiprocessing.Manager()
+        # Shared cache for workers (read-only during parallel phase is safer)
+        # For simplicity, we pass a copy or don't share the writeable cache here.
+        # Workers will use their own cache logic based on the passed state.
+        shared_move_cache = manager.dict(move_cache) # Pass current cache state
+
+        tasks = []
+        for move in legal_moves:
+            # Create a deep copy for each worker to avoid interference
+            gamestate_copy = copy.deepcopy(gamestate)
+            # Maximizing player is determined by the turn *before* the move is made
+            maximizing_player = (gamestate.current_turn == 'w')
+            tasks.append((move, gamestate_copy, depth, -float('inf'), float('inf'), maximizing_player, shared_move_cache))
+
+        results = pool.starmap(_minimax_worker, tasks)
+        pool.close()
+        pool.join()
+
+        all_results = []
+        for result in results:
+            if result is None: continue # Skip if worker failed badly
+            move, score = result
+            if score is not None: # Check if worker returned a valid score
+                all_results.append((move, score))
+
+        if not all_results:
+            # ... (Existing handling for no results) ...
+            print("[WARN] Minimax main: No valid scores returned from workers or no legal moves?")
+            if gamestate.checkmate: return None, -CHECKMATE_SCORE if gamestate.current_turn == 'w' else CHECKMATE_SCORE
+            if gamestate.stalemate: return None, STALEMATE_SCORE
+            legal_moves_fallback = gamestate.get_all_legal_moves() # Re-check
+            if not legal_moves_fallback: return None, STALEMATE_SCORE if not gamestate.is_in_check(gamestate.current_turn) else (-CHECKMATE_SCORE if gamestate.current_turn == 'w' else CHECKMATE_SCORE)
+            return random.choice(legal_moves_fallback), -float('inf') # Fallback random, bad score
+
+
+        # --- <<<< ПРИОРИТЕТ МАТА >>>> --- 
+        current_player_color = gamestate.current_turn
+        mating_score = CHECKMATE_SCORE if current_player_color == 'w' else -CHECKMATE_SCORE
+        best_mate_move = None
+
+        for move, score in all_results:
+            # Check for exact mating score
+            if score == mating_score:
+                print(f"[DEBUG Minimax Main] Found FORCED MATE move: {format_move_for_print(move)}")
+                best_mate_move = move
+                break # Found the best possible outcome
+
+        if best_mate_move is not None:
+            return best_mate_move, mating_score # Return immediately
+        # --- <<<< КОНЕЦ ПРИОРИТЕТА МАТА >>>> ---
+
+        # Find best move based on scores (standard minimax logic if no mate found)
+        best_move = all_results[0][0] # Default
+        if current_player_color == 'w': # Maximizing player
+            best_score = -float('inf')
+            for move, score in all_results:
+                if score > best_score:
+                    best_score = score
+                    best_move = move
+        else: # Minimizing player
+            best_score = float('inf')
+            for move, score in all_results:
+                if score < best_score:
+                    best_score = score
+                    best_move = move
+
+        # print(f"Minimax calculation took: {time.time() - start_time_minimax:.2f}s")
+        return best_move, best_score
+
+    except Exception as e:
+        print(f"Error in minimax function: {e}")
+        traceback.print_exc()
+        # Fallback: return a random move if possible
+        try:
+             moves = gamestate.get_all_legal_moves()
+             return random.choice(moves) if moves else None, 0
+        except:
+             return None, 0 # Ultimate fallback
+
+def _minimax_worker(move, gamestate_copy, depth, alpha, beta, maximizing_player, move_cache):
+    """Minimax function for a single move, executed by a worker process."""
+    # print(f"Worker evaluating move: {move}, Depth: {depth}, Max: {maximizing_player}")
+    start_time = time.time()
+    try:
+        # Make the move for which this worker is responsible
+        if not gamestate_copy.make_move(move, is_check_game_over=False):
+            # Return a bad score if the initial move is illegal (should not happen)
+            return move, -CHECKMATE_SCORE if maximizing_player else CHECKMATE_SCORE
+
+        # --- NO CACHE CHECK HERE - Cache check is done inside recursive calls --- 
+        # current_hash = get_position_hash(gamestate_copy)
+        # ... cache check logic removed ...
+
+        # Call the recursive helper starting from the state AFTER the move
+        # The next level alternates the player
+        score = _minimax_recursive(gamestate_copy, depth - 1, alpha, beta, not maximizing_player)
+
+        # --- NO CACHE STORE HERE - Cache is managed by main process --- 
+        # gamestate_copy.undo_move() # Backtrack is done implicitly by returning
+
+        # The score returned by _minimax_recursive is the evaluation of the position
+        # from the perspective of the player who just moved (the maximizing_player here).
+        return move, score
+    except Exception as e:
+        # ... (existing error handling) ...
+        try: move_str = format_move_for_print(move)
+        except: move_str = str(move)
+        print(f"Error in worker process for move {move_str}: {type(e).__name__} - {e}")
+        error_score = -CHECKMATE_SCORE if maximizing_player else CHECKMATE_SCORE # Assign worst score
+        return move, error_score
+
+def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_player):
+    """Recursive helper for minimax with alpha-beta pruning and mate priority."""
+
+    # --- Terminal State Check --- (Check BEFORE depth limit)
+    legal_moves = gamestate.get_all_legal_moves() # Get moves for the player whose turn it IS
+    if not legal_moves:
+        # Need is_in_check method from GameState
+        if hasattr(gamestate, 'is_in_check') and gamestate.is_in_check(gamestate.current_turn):
+            # Checkmate for the current player. Return score from opponent's view.
+            return -CHECKMATE_SCORE if gamestate.current_turn == 'w' else CHECKMATE_SCORE
+        else:
+            # Stalemate
+            return STALEMATE_SCORE
+
+    # --- Depth Limit Check --- 
+    if depth == 0:
+        # Evaluate quiescent state
+        return _quiescence_search(gamestate, alpha, beta, maximizing_player, MAX_QUIESCENCE_DEPTH)
+
+    # --- Move Iteration with Mate Priority --- 
+    if maximizing_player: # White trying to maximize
+        max_eval = -float('inf')
+        for move in legal_moves:
+            if not gamestate.make_move(move, is_check_game_over=False): continue # Skip illegal moves
+            
+            eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False) # Recursive call for Black
+            gamestate.undo_move() # Backtrack
+
+            # <<< Mate Check >>>
+            if eval_score >= CHECKMATE_SCORE: 
+                # This move leads to White checkmating Black
+                #print(f"[DEBUG MaxRec] Found mate via {format_move_for_print(move)} -> Score: {CHECKMATE_SCORE}")
+                return CHECKMATE_SCORE # Return mate score immediately
+            
+            max_eval = max(max_eval, eval_score)
+            alpha = max(alpha, eval_score)
+            if beta <= alpha:
+                break # Beta cut-off
+        return max_eval
+
+    else: # Minimizing player (Black trying to minimize)
+        min_eval = float('inf')
+        for move in legal_moves:
+            if not gamestate.make_move(move, is_check_game_over=False): continue
+            
+            eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True) # Recursive call for White
+            gamestate.undo_move() # Backtrack
+
+            # <<< Mate Check >>>
+            if eval_score <= -CHECKMATE_SCORE:
+                 # This move leads to Black checkmating White
+                 #print(f"[DEBUG MinRec] Found mate via {format_move_for_print(move)} -> Score: {-CHECKMATE_SCORE}")
+                 return -CHECKMATE_SCORE # Return mate score immediately
+            
+            min_eval = min(min_eval, eval_score)
+            beta = min(beta, eval_score)
+            if beta <= alpha:
+                break # Alpha cut-off
+        return min_eval
+
+# --- Quiescence Search ---
+def _quiescence_search(gamestate: GameState, alpha, beta, maximizing_player, depth):
+    """Search only 'noisy' moves (captures, promotions, checks) to stabilize evaluation."""
+
+    # Evaluate the standing position (score if no noisy moves are made)
+    stand_pat_score = evaluate_position(gamestate)
+
+    # --- Terminal Check within Quiescence --- 
+    legal_moves_q = gamestate.get_all_legal_moves()
+    if not legal_moves_q:
+         if hasattr(gamestate, 'is_in_check') and gamestate.is_in_check(gamestate.current_turn):
+             return -CHECKMATE_SCORE if gamestate.current_turn == 'w' else CHECKMATE_SCORE
+         else:
+             return STALEMATE_SCORE
+             
+    if depth == 0:
+        return stand_pat_score # Depth limit reached
+
+    if maximizing_player:
+        if stand_pat_score >= beta:
+            return beta # Fail-high (score is already too good for maximizing player)
+        alpha = max(alpha, stand_pat_score)
+
+        noisy_moves = get_noisy_moves(gamestate)
+        if not noisy_moves: return stand_pat_score # No noisy moves, return static eval
+        
+        for move in noisy_moves:
+             if not gamestate.make_move(move, is_check_game_over=False): continue
+             score = _quiescence_search(gamestate, alpha, beta, False, depth - 1)
+             gamestate.undo_move()
+             
+             # <<< Mate Check >>>
+             if score >= CHECKMATE_SCORE:
+                 #print(f"[DEBUG QMax] Found mate via {format_move_for_print(move)} -> Score: {CHECKMATE_SCORE}")
+                 return CHECKMATE_SCORE # Return mate immediately
+                 
+             alpha = max(alpha, score)
+             if alpha >= beta:
+                 break # Beta cut-off
+        return alpha # Return the best score found for maximizing player
+
+    else: # Minimizing player
+        if stand_pat_score <= alpha:
+            return alpha # Fail-low (score is already too good for minimizing player)
+        beta = min(beta, stand_pat_score)
+
+        noisy_moves = get_noisy_moves(gamestate)
+        if not noisy_moves: return stand_pat_score
+        
+        for move in noisy_moves:
+             if not gamestate.make_move(move, is_check_game_over=False): continue
+             score = _quiescence_search(gamestate, alpha, beta, True, depth - 1)
+             gamestate.undo_move()
+             
+             # <<< Mate Check >>>
+             if score <= -CHECKMATE_SCORE:
+                 #print(f"[DEBUG QMin] Found mate via {format_move_for_print(move)} -> Score: {-CHECKMATE_SCORE}")
+                 return -CHECKMATE_SCORE # Return mate immediately
+                 
+             beta = min(beta, score)
+             if beta <= alpha:
+                 break # Alpha cut-off
+        return beta # Return the best score found for minimizing player
+
+# Placeholder/Helper functions needed by find_best_move's cache logic
+def parse_move_string(move_str):
+    """Placeholder: Converts move string (e.g., 'e2e4', 'N@c3') back to internal move format."""
+    # This needs proper implementation based on your move format
+    # Example for simple moves:
+    try:
+        if '@' in move_str: # Drop move like P@e4
+            piece_char, sq_str = move_str.split('@')
+            target_sq = algebraic_to_coords(sq_str)
+            if target_sq:
+                return ('drop', piece_char, target_sq)
+        elif len(move_str) >= 4:
+             start_sq_str = move_str[:2]
+             end_sq_str = move_str[2:4]
+             promotion_char = move_str[4] if len(move_str) == 5 else None
+             start_sq = algebraic_to_coords(start_sq_str)
+             end_sq = algebraic_to_coords(end_sq_str)
+             if start_sq and end_sq:
+                  return (start_sq, end_sq, promotion_char)
+    except Exception as e:
+        print(f"[ERROR] Failed to parse move string '{move_str}': {e}")
+    return None
+
+def is_move_still_legal(gamestate, move):
+    """Placeholder: Checks if a move is legal in the current gamestate."""
+    # This should ideally use the GameState's validation or check against get_all_legal_moves
+    try:
+        return move in gamestate.get_all_legal_moves()
+    except Exception as e:
+        print(f"[ERROR] Failed to check legality for move {move}: {e}")
+        return False # Assume illegal if check fails
+# --- End Placeholder --- 
