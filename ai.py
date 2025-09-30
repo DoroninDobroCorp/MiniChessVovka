@@ -8,15 +8,15 @@ import multiprocessing
 import pickle # For deep copying complex objects like GameState
 import hashlib
 import traceback
-from utils import format_move_for_print, algebraic_to_coords
+from utils import format_move_for_print, algebraic_to_coords, get_piece_color, get_opposite_color
+from config import BOARD_SIZE
 
-BOARD_SIZE = 6
-EMPTY_SQUARE = '--'
+ 
 
 # Piece values (example, adjust as needed)
 # Increased difference between pieces
-PIECE_VALUES = {'P': 100, 'N': 350, 'B': 360, 'R': 550, 'K': 10000}
-HAND_PIECE_VALUES = {'P': 110, 'N': 385, 'B': 395, 'R': 605} # Slightly more valuable in hand?
+PIECE_VALUES = {'P': 100, 'N': 320, 'B': 330, 'R': 500, 'Q': 900, 'K': 20000}
+HAND_PIECE_VALUES = {'P': 150, 'N': 400, 'B': 410, 'R': 650, 'Q': 1000} # Much more valuable in hand for drops!
 
 # --- Game Phase Constants ---
 OPENING_PHASE = 0
@@ -27,14 +27,24 @@ ENDGAME_PHASE = 1 # Simplified: endgame if few pieces left
 # Indices for a 6x6 board need adjustment. Let's assume center is roughly rows 2,3 and cols 2,3
 # (0,0) top-left -> (5,5) bottom-right
 CENTER_SQUARES = [(2, 2), (2, 3), (3, 2), (3, 3)]
-CENTER_BONUS = 10 # Bonus points per piece in center
-KING_SAFETY_BONUS = 5 # Small bonus for pieces near king
-MOBILITY_BONUS = 2 # Bonus per legal move
-PAWN_STRUCTURE_BONUS = 3 # Bonus for connected pawns (simple check)
+CENTER_BONUS = 15 # Bonus points per piece in center
+KING_SAFETY_BONUS = 8 # Small bonus for pieces near king
+MOBILITY_BONUS = 3 # Bonus per legal move
+PAWN_STRUCTURE_BONUS = 5 # Bonus for connected pawns (simple check)
+ATTACK_KING_ZONE_BONUS = 20 # Bonus for attacking squares near enemy king
+DROP_THREAT_BONUS = 25 # Extra bonus for having pieces in hand (drop threats)
 
 # --- Transposition Table (Now a simple Move Cache) ---
 # Stores: {position_hash: best_move_repr}
 move_cache = {}
+
+# --- Transposition Table for Alpha-Beta ---
+# key: position hash; value: dict(depth=int, score=float, flag=str('EXACT'|'LOWERBOUND'|'UPPERBOUND'), best_move=move)
+tt = {}
+
+# --- Killer Moves and History Heuristic ---
+killer_moves = {}  # {depth: [move1, move2]}
+history_scores = {}  # {move_repr: score}
 
 # --- Database Handling for Move Cache ---
 DB_PATH = "move_cache.db" # Renamed DB file
@@ -48,7 +58,7 @@ NUM_WORKERS = None
 # --- Constants ---
 CHECKMATE_SCORE = 1000000 # Large score for checkmate
 STALEMATE_SCORE = 0       # Score for stalemate
-MAX_QUIESCENCE_DEPTH = 2  # Limit quiescence search depth
+MAX_QUIESCENCE_DEPTH = 4  # Limit quiescence search depth (increased for better tactics)
 
 def setup_db():
     """Creates the move_cache table if it doesn't exist."""
@@ -106,9 +116,11 @@ def save_move_cache_to_db(cache_to_save):
 # Import the actual GameState class and necessary constants
 try:
     from gamestate import GameState # Import GameState class
-    from pieces import KING, PAWN, PROMOTION_PIECES_WHITE_STR, PROMOTION_PIECES_BLACK_STR # Import constants
+    from pieces import EMPTY_SQUARE, KING, PAWN, PROMOTION_PIECES_WHITE_STR, PROMOTION_PIECES_BLACK_STR # Import constants
 except ImportError:
     print("Warning: gamestate.py or pieces.py not found. Using dummy GameState.")
+    # Provide minimal fallbacks for constants
+    EMPTY_SQUARE = '.'
     # Define a basic dummy class for structure
     class GameState:
         def __init__(self):
@@ -143,15 +155,7 @@ except ImportError:
 
 
 # --- Helper Functions ---
-def get_piece_color(piece):
-    """Returns the color of the piece ('w' or 'b') or None if empty."""
-    if piece == EMPTY_SQUARE or piece is None:
-        return None
-    return 'w' if piece.isupper() else 'b'
-
-def get_opposite_color(color):
-    """Returns the opposite color."""
-    return 'b' if color == 'w' else 'w'
+# Using helpers imported from utils: get_piece_color, get_opposite_color
 
 def get_position_hash(gamestate: GameState):
     """Generates a unique and STABLE hash for the current game state including hands and turn.
@@ -250,27 +254,34 @@ def evaluate_position(gamestate: GameState):
                 if piece_color == 'w':
                     score += value
                     if (r, c) in CENTER_SQUARES: score += CENTER_BONUS
-                    if piece_type == PAWN: white_pawns.append((r, c))
+                    if piece_type == 'P': white_pawns.append((r, c))
                     # King safety bonus (simple: distance)
-                    if white_king_r != -1 and piece_type != KING:
+                    if white_king_r != -1 and piece_type != 'K':
                          dist = max(abs(r - white_king_r), abs(c - white_king_c))
                          if dist <= 2: score += KING_SAFETY_BONUS
                 else:
                     score -= value
                     if (r, c) in CENTER_SQUARES: score -= CENTER_BONUS
-                    if piece_type == PAWN: black_pawns.append((r, c))
+                    if piece_type == 'P': black_pawns.append((r, c))
                      # King safety bonus
-                    if black_king_r != -1 and piece_type != KING:
+                    if black_king_r != -1 and piece_type != 'K':
                          dist = max(abs(r - black_king_r), abs(c - black_king_c))
                          if dist <= 2: score -= KING_SAFETY_BONUS
 
-    # Add hand material value
+    # Add hand material value + drop threat bonus
+    white_hand_count = sum(gamestate.hands.get('w', {}).values())
+    black_hand_count = sum(gamestate.hands.get('b', {}).values())
+    
     for piece, count in gamestate.hands.get('w', {}).items():
         score += HAND_PIECE_VALUES.get(piece.upper(), 0) * count
         total_material += PIECE_VALUES.get(piece.upper(), 0) * count # Use board value for phase
     for piece, count in gamestate.hands.get('b', {}).items():
         score -= HAND_PIECE_VALUES.get(piece.upper(), 0) * count
         total_material += PIECE_VALUES.get(piece.upper(), 0) * count
+    
+    # Bonus for having pieces in hand (drop flexibility)
+    score += white_hand_count * DROP_THREAT_BONUS
+    score -= black_hand_count * DROP_THREAT_BONUS
 
     # Determine game phase (simplified)
     # Less than ~2 Rooks worth of material left besides kings? Consider it endgame.
@@ -284,24 +295,24 @@ def evaluate_position(gamestate: GameState):
     # 3. Pawn Structure (very simple: connected pawns)
     for r, c in white_pawns:
         # Check adjacent files for friendly pawns
-        if c > 0 and gamestate.get_piece(r, c-1) == 'P': score += PAWN_STRUCTURE_BONUS
-        if c < BOARD_SIZE-1 and gamestate.get_piece(r, c+1) == 'P': score += PAWN_STRUCTURE_BONUS
+        if c > 0 and gamestate.board[r][c-1] == 'P': score += PAWN_STRUCTURE_BONUS
+        if c < BOARD_SIZE-1 and gamestate.board[r][c+1] == 'P': score += PAWN_STRUCTURE_BONUS
         # Add bonus for passed pawns (no opponent pawns ahead in this or adjacent files) - simplified
         is_passed = True
         for scan_r in range(r - 1, -1, -1): # Check rows ahead
-            if gamestate.get_piece(scan_r, c) == 'p': is_passed = False; break
-            if c > 0 and gamestate.get_piece(scan_r, c-1) == 'p': is_passed = False; break
-            if c < BOARD_SIZE-1 and gamestate.get_piece(scan_r, c+1) == 'p': is_passed = False; break
+            if gamestate.board[scan_r][c] == 'p': is_passed = False; break
+            if c > 0 and gamestate.board[scan_r][c-1] == 'p': is_passed = False; break
+            if c < BOARD_SIZE-1 and gamestate.board[scan_r][c+1] == 'p': is_passed = False; break
         if is_passed: score += (BOARD_SIZE - 1 - r) * 10 # Bonus increases closer to promotion
 
     for r, c in black_pawns:
-        if c > 0 and gamestate.get_piece(r, c-1) == 'p': score -= PAWN_STRUCTURE_BONUS
-        if c < BOARD_SIZE-1 and gamestate.get_piece(r, c+1) == 'p': score -= PAWN_STRUCTURE_BONUS
+        if c > 0 and gamestate.board[r][c-1] == 'p': score -= PAWN_STRUCTURE_BONUS
+        if c < BOARD_SIZE-1 and gamestate.board[r][c+1] == 'p': score -= PAWN_STRUCTURE_BONUS
         is_passed = True
         for scan_r in range(r + 1, BOARD_SIZE): # Check rows ahead
-            if gamestate.get_piece(scan_r, c) == 'P': is_passed = False; break
-            if c > 0 and gamestate.get_piece(scan_r, c-1) == 'P': is_passed = False; break
-            if c < BOARD_SIZE-1 and gamestate.get_piece(scan_r, c+1) == 'P': is_passed = False; break
+            if gamestate.board[scan_r][c] == 'P': is_passed = False; break
+            if c > 0 and gamestate.board[scan_r][c-1] == 'P': is_passed = False; break
+            if c < BOARD_SIZE-1 and gamestate.board[scan_r][c+1] == 'P': is_passed = False; break
         if is_passed: score -= r * 10 # Bonus increases closer to promotion
 
     # 4. King Safety (endgame vs opening)
@@ -326,36 +337,19 @@ def get_noisy_moves(gamestate: GameState):
     moves = gamestate.get_all_legal_moves()
     noisy_moves = []
     for move in moves:
-        # Check if it's a capture
-        is_capture = False
-        if move[0] == 'move':
-            end_r, end_c = move[2]
-            if gamestate.board[end_r][end_c] != EMPTY_SQUARE:
-                is_capture = True
-        elif move[0] == 'drop':
-             # Drops are generally less forcing but change material, include them? Maybe.
-             # is_capture = True # Let's consider drops noisy for now
-             pass # Or don't include drops as noisy unless they give check?
-
-        # Check if it's a promotion
-        is_promotion = False
-        if move[0] == 'move':
-            start_r, _ = move[1]
-            end_r, _ = move[2]
-            piece = gamestate.board[start_r][_] # Piece being moved
-            if piece.upper() == PAWN:
-                if (piece == 'P' and end_r == 0) or (piece == 'p' and end_r == BOARD_SIZE - 1):
-                    is_promotion = True
-
-        # Check if it gives check (more expensive)
-        # gives_check = False
-        # next_state = copy.deepcopy(gamestate)
-        # if next_state.make_move(move, is_check_game_over=False):
-        #      if next_state.is_in_check():
-        #           gives_check = True
-
-        if is_capture or is_promotion: # or gives_check:
-            noisy_moves.append(move)
+        try:
+            # Drop moves are not inherently captures; skip them in quiescence
+            if isinstance(move, tuple) and move and move[0] == 'drop':
+                continue
+            # Normal move: ((r1,f1),(r2,f2), promotion)
+            (start_r, start_c), (end_r, end_c), promotion = move
+            is_capture = gamestate.board[end_r][end_c] != EMPTY_SQUARE
+            is_promotion = promotion is not None
+            if is_capture or is_promotion:
+                noisy_moves.append(move)
+        except Exception:
+            # If move format is unexpected, skip it
+            continue
     return noisy_moves
 
 
@@ -425,36 +419,35 @@ def quiescence_search(gamestate: GameState, alpha, beta, depth):
 # --- MVV-LVA Heuristic ---
 def mvv_lva_score(gamestate, move):
     """ Assigns a score for move ordering based on Most Valuable Victim - Least Valuable Aggressor. """
-    if move[0] != 'move': return 0 # Only score board moves
-
-    start_sq, end_sq = move[1], move[2]
-    start_r, start_c = start_sq
-    end_r, end_c = end_sq
-
-    aggressor_piece = gamestate.board[start_r][start_c]
-    victim_piece = gamestate.board[end_r][end_c]
-
-    if aggressor_piece == EMPTY_SQUARE: return 0 # Should not happen for legal moves
-
-    aggressor_value = PIECE_VALUES.get(aggressor_piece.upper(), 0)
-
-    if victim_piece != EMPTY_SQUARE:
-        victim_value = PIECE_VALUES.get(victim_piece.upper(), 0)
-        # High score for capturing valuable piece with less valuable one
-        return (victim_value * 10) - aggressor_value
-    else:
-        # Check for promotion
-        is_promotion = False
-        piece_type = aggressor_piece.upper()
-        piece_color = get_piece_color(aggressor_piece)
-        if piece_type == PAWN:
-             if (piece_color == 'w' and end_r == 0) or \
-                (piece_color == 'b' and end_r == BOARD_SIZE - 1):
-                 is_promotion = True
-        if is_promotion:
-             return 900 # Promotions are usually good, score high
-
-    return 0 # Quiet move
+    # Handle normal board moves: ((r1,f1),(r2,f2), promotion)
+    if isinstance(move, tuple) and move and move[0] != 'drop':
+        (start_r, start_c), (end_r, end_c), promotion = move
+        aggressor_piece = gamestate.board[start_r][start_c]
+        victim_piece = gamestate.board[end_r][end_c]
+        if aggressor_piece == EMPTY_SQUARE:
+            return 0 # Should not happen for legal moves
+        aggressor_value = PIECE_VALUES.get(aggressor_piece.upper(), 0)
+        if victim_piece != EMPTY_SQUARE:
+            victim_value = PIECE_VALUES.get(victim_piece.upper(), 0)
+            # High score for capturing valuable piece with less valuable one
+            return (victim_value * 10) - aggressor_value
+        # Promotion bonus
+        if promotion:
+            return 900
+        # Add history heuristic bonus for quiet moves
+        move_repr = repr(move)
+        history_bonus = history_scores.get(move_repr, 0)
+        return history_bonus
+    # Drops: treat as quiet, slight ordering by piece value in hand
+    if isinstance(move, tuple) and move and move[0] == 'drop':
+        piece_code = move[1]  # e.g., 'wN'
+        if isinstance(piece_code, str) and len(piece_code) == 2:
+            base_score = HAND_PIECE_VALUES.get(piece_code[1].upper(), 0) // 10
+            move_repr = repr(move)
+            history_bonus = history_scores.get(move_repr, 0)
+            return base_score + history_bonus
+        return 0
+    return 0 # Unknown format
 
 
 # --- Minimax with Alpha-Beta (Simplified - No TT logic inside) ---
@@ -468,15 +461,41 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
         q_score = quiescence_search(gamestate, alpha, beta, MAX_QUIESCENCE_DEPTH)
         return q_score, None
 
+    # Transposition Table probe
+    pos_hash = get_position_hash(gamestate)
+    tt_entry = tt.get(pos_hash)
+
     legal_moves = gamestate.get_all_legal_moves()
     if not legal_moves:
         return evaluate_position(gamestate), None
 
-    # Simple move ordering (e.g., MVV-LVA can still be beneficial)
-    move_scores = {move: mvv_lva_score(gamestate, move) for move in legal_moves}
-    legal_moves.sort(key=lambda m: move_scores.get(m, 0), reverse=True)
+    # TT-based alpha/beta tightening
+    if tt_entry and tt_entry.get('depth', -1) >= depth:
+        if tt_entry['flag'] == 'EXACT':
+            return tt_entry['score'], tt_entry.get('best_move')
+        elif tt_entry['flag'] == 'LOWERBOUND':
+            alpha = max(alpha, tt_entry['score'])
+        elif tt_entry['flag'] == 'UPPERBOUND':
+            beta = min(beta, tt_entry['score'])
+        if alpha >= beta:
+            return tt_entry['score'], tt_entry.get('best_move')
+
+    # Advanced move ordering: TT best-move first, then killer moves, then MVV-LVA + history
+    tt_best = tt_entry.get('best_move') if tt_entry else None
+    killers = killer_moves.get(depth, [])
+    
+    def move_order_score(move):
+        if tt_best is not None and move == tt_best:
+            return 1000000  # TT move first
+        elif move in killers:
+            return 50000 + (100 - killers.index(move))  # Killer moves next
+        else:
+            return mvv_lva_score(gamestate, move)  # MVV-LVA + history
+    
+    legal_moves.sort(key=move_order_score, reverse=True)
 
     best_move_for_depth = None
+    orig_alpha, orig_beta = alpha, beta
     if maximizing_player: # White
         max_eval = -float('inf')
         for move in legal_moves:
@@ -495,6 +514,16 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
                 best_move_for_depth = move # Store the move that led to max_eval
             alpha = max(alpha, eval_score)
             if alpha >= beta:
+                # Update killer moves and history for cutoff move
+                if best_move_for_depth and alpha >= beta:
+                    move_repr = repr(best_move_for_depth)
+                    history_scores[move_repr] = history_scores.get(move_repr, 0) + depth * depth
+                    if depth not in killer_moves:
+                        killer_moves[depth] = []
+                    if best_move_for_depth not in killer_moves[depth]:
+                        killer_moves[depth].insert(0, best_move_for_depth)
+                        if len(killer_moves[depth]) > 2:
+                            killer_moves[depth].pop()
                 break # Beta cutoff
         final_score = max_eval
     else: # Black (Minimizing)
@@ -515,10 +544,32 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
                 best_move_for_depth = move # Store the move that led to min_eval
             beta = min(beta, eval_score)
             if alpha >= beta:
+                # Update killer moves and history for cutoff move
+                if best_move_for_depth and alpha >= beta:
+                    move_repr = repr(best_move_for_depth)
+                    history_scores[move_repr] = history_scores.get(move_repr, 0) + depth * depth
+                    if depth not in killer_moves:
+                        killer_moves[depth] = []
+                    if best_move_for_depth not in killer_moves[depth]:
+                        killer_moves[depth].insert(0, best_move_for_depth)
+                        if len(killer_moves[depth]) > 2:
+                            killer_moves[depth].pop()
                 break # Alpha cutoff
         final_score = min_eval
 
-    # No cache storage here - handled by find_best_move
+    # Store to TT
+    flag = 'EXACT'
+    if final_score <= orig_alpha:
+        flag = 'UPPERBOUND'
+    elif final_score >= orig_beta:
+        flag = 'LOWERBOUND'
+    tt[pos_hash] = {
+        'depth': depth,
+        'score': final_score,
+        'flag': flag,
+        'best_move': best_move_for_depth,
+    }
+
     return final_score, best_move_for_depth
 
 
@@ -556,7 +607,7 @@ def evaluate_move_worker(args):
 
 
 # --- Main AI Function (Using Simple Move Cache) ---
-def find_best_move(gamestate: GameState, depth=12): # Changed default depth to 12
+def find_best_move(gamestate: GameState, depth=16): # Changed default depth to 16 for stronger play
     """
     Finds the best move using fixed depth search and a simple move cache.
     Checks cache first, then performs parallel search if needed.
@@ -638,52 +689,14 @@ def find_best_move(gamestate: GameState, depth=12): # Changed default depth to 1
         except NotImplementedError: num_workers = 1
         print(f"Using {num_workers} worker processes for depth {depth} search.")
 
-        if num_workers <= 1 or len(legal_moves) <= 1:
-            print("Running search in single process.")
-            # Pass the ORIGINAL gamestate, minimax handles copying
-            best_score, best_move = minimax_alpha_beta(gamestate, depth, -float('inf'), float('inf'), is_maximizing)
-        else:
-            # Parallel processing
-            try:
-                # Serialize the ORIGINAL gamestate for workers
-                gs_pickle_dump = pickle.dumps(gamestate)
-            except Exception as dump_error:
-                print(f"FATAL: Could not pickle GameState: {dump_error}. Selecting random.")
-                return random.choice(legal_moves) if legal_moves else None
-
-            # Tasks for simplified workers (depth-1 called inside worker)
-            tasks = [(move, depth, -float('inf'), float('inf'), is_maximizing, gs_pickle_dump)
-                     for move in legal_moves]
-
-            worker_scores = []
-            try:
-                # Use spawn context if available and on non-Windows for better isolation
-                # context = multiprocessing.get_context("spawn") if hasattr(multiprocessing, 'get_context') and os.name != 'nt' else None
-                # pool = multiprocessing.Pool(processes=num_workers, context=context)
-                pool = multiprocessing.Pool(processes=num_workers)
-                worker_scores = pool.map(evaluate_move_worker, tasks) # Get only scores
-                pool.close()
-                pool.join()
-                pool = None # Signal pool is closed
-            except Exception as pool_error:
-                print(f"Error during parallel processing: {pool_error}. Aborting search.")
-                if pool: pool.terminate(); pool.join() # Terminate and wait
-                # Fallback to random move maybe? Or re-raise?
-                return random.choice(legal_moves) if legal_moves else None # Fallback
-
-            if len(worker_scores) == len(legal_moves):
-                move_scores = list(zip(legal_moves, worker_scores))
-                # Find the best move based on scores returned by workers
-                if is_maximizing:
-                    best_move_score_pair = max(move_scores, key=lambda item: item[1])
-                else:
-                    best_move_score_pair = min(move_scores, key=lambda item: item[1])
-                best_move = best_move_score_pair[0]
-                best_score = best_move_score_pair[1] # Store score for info
-            else:
-                print(f"Warning: Mismatch between worker results ({len(worker_scores)}) and legal moves ({len(legal_moves)}). Selecting random.")
-                best_move = random.choice(legal_moves)
-                best_score = 0 # Unknown score
+        # Iterative deepening with TT
+        best_move = None
+        best_score = -float('inf') if is_maximizing else float('inf')
+        for d in range(1, depth + 1):
+            score_d, move_d = minimax_alpha_beta(gamestate, d, -float('inf'), float('inf'), is_maximizing)
+            if move_d is not None:
+                best_move, best_score = move_d, score_d
+            # Optional: simple aspiration can be added later
 
     except Exception as e:
         print(f"An error occurred during AI move calculation: {e}")

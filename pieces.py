@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-import pygame
+try:
+    import pygame
+except Exception:
+    pygame = None  # Allow headless import without pygame
 from config import SQUARE_SIZE, WHITE, BLACK, PIECE_BG_COLORS
 
 # --- Piece Representation ---

@@ -8,6 +8,9 @@ from utils import (get_piece_color, is_on_board, get_opposite_color,
                    piece_to_lower, piece_to_upper)
 
 
+# Debug flag for move generation verbosity
+DEBUG_LOG = False
+
 # --- Game State Class ---
 class GameState:
     """Класс для представления состояния игры"""
@@ -31,7 +34,7 @@ class GameState:
         self.last_move_for_promotion = None
         self.white_ai_enabled = False
         self.black_ai_enabled = True
-        self.ai_depth = 4
+        self.ai_depth = 16  # Increased for stronger play
         self.show_hint = False # Note: show_hint itself is global in main.py
         self._all_legal_moves_cache = None
         self._is_check_cache = None
@@ -105,16 +108,19 @@ class GameState:
 
     def copy(self):
         """Создает и возвращает глубокую копию текущего объекта GameState."""
-        print(f"[DEBUG GameState.copy] Entered copy() for object with id: {id(self)}")
-        # Сначала копируем критические данные, особенно hands
-        print(f"[DEBUG GameState.copy ENTRY] self.hands = {self.hands}")
+        if DEBUG_LOG:
+            print(f"[DEBUG GameState.copy] Entered copy() for object with id: {id(self)}")
+            # Сначала копируем критические данные, особенно hands
+            print(f"[DEBUG GameState.copy ENTRY] self.hands = {self.hands}")
         try:
             hands_copy = copy.deepcopy(self.hands)
-            print(f"[DEBUG GameState.copy] Result of deepcopy(self.hands): {hands_copy}")
+            if DEBUG_LOG:
+                print(f"[DEBUG GameState.copy] Result of deepcopy(self.hands): {hands_copy}")
             board_copy = copy.deepcopy(self.board)
             king_pos_copy = copy.deepcopy(self.king_pos)
         except Exception as e:
-            print(f"[ERROR GameState.copy] Deepcopy failed: {e}")
+            if DEBUG_LOG:
+                print(f"[ERROR GameState.copy] Deepcopy failed: {e}")
             # В случае ошибки вернем пустой или базовый стейт, чтобы избежать креша
             # но это укажет на проблему
             hands_copy = {'w':{}, 'b':{}}
@@ -146,7 +152,8 @@ class GameState:
         new_state.ai_depth = self.ai_depth
         new_state._all_legal_moves_cache = None
 
-        print(f"[DEBUG GameState.copy EXIT] new_state.hands = {new_state.hands}")
+        if DEBUG_LOG:
+            print(f"[DEBUG GameState.copy EXIT] new_state.hands = {new_state.hands}")
         return new_state
 
     def find_kings(self):
@@ -495,7 +502,8 @@ class GameState:
         #     print(f"      {r_idx}: {row}")
             
         # Moves from pieces on board
-        print(f"[DEBUG Board Check] Checking board for {color} moves...") # Отладка
+        if DEBUG_LOG:
+            print(f"[DEBUG Board Check] Checking board for {color} moves...") # Отладка
         for r in range(BOARD_SIZE):
             for f in range(BOARD_SIZE):
                 piece = self.board[r][f] # Используем self.board
@@ -524,7 +532,8 @@ class GameState:
         # Drop moves from hand
         # print(f"[DEBUG Drop] Getting drops for {color}. Hand: {self.hands.get(color)}")
         player_hand = self.hands.get(color, {}) # Используем self.hands
-        print(f"[DEBUG Drop Check] Checking drops for {color}. Hand: {player_hand}") # Отладка
+        if DEBUG_LOG:
+            print(f"[DEBUG Drop Check] Checking drops for {color}. Hand: {player_hand}") # Отладка
         if player_hand:
             for piece_type_upper, count in player_hand.items():
                 if count > 0:
@@ -539,7 +548,8 @@ class GameState:
                             continue
                         for f in range(BOARD_SIZE):
                             target_cell = self.board[r][f]
-                            print(f"  Checking drop at ({r},{f}): Cell='{target_cell}' ({type(target_cell)}), EMPTY_SQUARE='{EMPTY_SQUARE}' ({type(EMPTY_SQUARE)}), Comparison Result: {target_cell == EMPTY_SQUARE}")
+                            if DEBUG_LOG:
+                                print(f"  Checking drop at ({r},{f}): Cell='{target_cell}' ({type(target_cell)}), EMPTY_SQUARE='{EMPTY_SQUARE}' ({type(EMPTY_SQUARE)}), Comparison Result: {target_cell == EMPTY_SQUARE}")
                             if target_cell == EMPTY_SQUARE:
                                 drop_move = ('drop', piece_code, (r, f)) # Use constructed piece_code
                                 moves.append(drop_move)
@@ -547,8 +557,9 @@ class GameState:
                     # print(f"[DEBUG Drop] Finished checking drops for {piece_char}") # Отладка
 
         # print(f"[DEBUG Pseudo] Total pseudo-legal moves: {len(moves)}")
-        print(f"[DEBUG Pseudo Gen] For {color}, Generated {len(drop_moves_generated)} drop moves: {drop_moves_generated}") # Отладка
-        print(f"[DEBUG Pseudo Gen] For {color}, Total generated pseudo-legal moves: {len(moves)}") # Отладка
+        if DEBUG_LOG:
+            print(f"[DEBUG Pseudo Gen] For {color}, Generated {len(drop_moves_generated)} drop moves: {drop_moves_generated}") # Отладка
+            print(f"[DEBUG Pseudo Gen] For {color}, Total generated pseudo-legal moves: {len(moves)}") # Отладка
         return moves
 
     def get_all_legal_moves(self):
@@ -566,7 +577,8 @@ class GameState:
         # Он использует self.board и self.hands
         pseudo_legal_moves = self.generate_all_pseudo_legal_moves(current_color)
         # print(f"[DEBUG Legality] Pseudo-legal for {current_color}: {pseudo_legal_moves}")
-        print(f"[DEBUG Legality Check] For {current_color}, received {len(pseudo_legal_moves)} pseudo-legal moves to check.") # Отладка
+        if DEBUG_LOG:
+            print(f"[DEBUG Legality Check] For {current_color}, received {len(pseudo_legal_moves)} pseudo-legal moves to check.") # Отладка
 
         # Для проверки легальности нам все еще нужно симулировать ходы
         # Сохраняем состояние ТЕКУЩЕГО объекта (не нужно, симулируем на копии)
@@ -594,7 +606,8 @@ class GameState:
 
         self._all_legal_moves_cache = legal_moves
         # print(f"[DEBUG Legality] Legal moves for {current_color}: {legal_moves}")
-        print(f"[DEBUG Legality Check] For {current_color}, Found {len(legal_moves)} legal moves after filtering.") # Отладка
+        if DEBUG_LOG:
+            print(f"[DEBUG Legality Check] For {current_color}, Found {len(legal_moves)} legal moves after filtering.") # Отладка
         return legal_moves
 
     def is_in_check(self, color):

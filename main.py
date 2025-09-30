@@ -16,7 +16,7 @@ from utils import * # Helper functions
 from gamestate import GameState # Core game logic class
 from gui import * # All drawing functions and GUI helpers
 import ai # <<< Меняем импорт, чтобы иметь доступ к ai.load/save
-from mate_trainer import MateTrainer # Тренажёр
+# from mate_trainer import MateTrainer # Тренажёр
 # from ai import * # AI functions (needed for direct calls?) - find_best_move is in thread
 from thread_utils import AIThread # AI thread class
 
@@ -255,18 +255,18 @@ def main():
                       making_ai_move = True
                       ai_thread = AIThread(gamestate, gamestate.ai_depth)
                       ai_thread.start()
-            elif clicked_button_info == 'trainer_button': # <<< Добавляем обработку кнопки тренажёра >>>
-                print("Запуск тренажёра...")
-                # <<< Передаем screen и загруженные изображения >>>
-                trainer = MateTrainer(screen, PIECE_IMAGES)
-                trainer.run() # Запускаем тренажёр
-                # После выхода из тренажёра, основной цикл продолжит работу
-                print("Выход из тренажёра.")
-                # <<< Перерисовываем основной экран после выхода из тренажера >>>
-                # Это нужно, так как тренажер мог изменить содержимое экрана
-                screen.fill(INFO_BG_COLOR)
-                ui_elements = draw_game_state(screen, gamestate)
-                pygame.display.flip()
+            # elif clicked_button_info == 'trainer_button': # <<< Убрано - нет тренажёра >>>
+            #     print("Запуск тренажёра...")
+            #     # <<< Передаем screen и загруженные изображения >>>
+            #     trainer = MateTrainer(screen, PIECE_IMAGES)
+            #     trainer.run() # Запускаем тренажёр
+            #     # После выхода из тренажёра, основной цикл продолжит работу
+            #     print("Выход из тренажёра.")
+            #     # <<< Перерисовываем основной экран после выхода из тренажера >>>
+            #     # Это нужно, так как тренажер мог изменить содержимое экрана
+            #     screen.fill(INFO_BG_COLOR)
+            #     ui_elements = draw_game_state(screen, gamestate)
+            #     pygame.display.flip()
             clicked_button_info = None
 
         # Handle Promotion Choice Click
