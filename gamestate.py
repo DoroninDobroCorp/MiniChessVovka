@@ -8,9 +8,6 @@ from utils import (get_piece_color, is_on_board, get_opposite_color,
                    piece_to_lower, piece_to_upper)
 
 
-# Debug flag for move generation verbosity
-DEBUG_LOG = False
-
 # --- Game State Class ---
 class GameState:
     """Класс для представления состояния игры"""
@@ -93,8 +90,6 @@ class GameState:
         # Remove the undone move from the log if necessary
         if self.move_log:
             undone_move = self.move_log.pop()
-            # print(f"Removed move from log: {format_move_for_print(undone_move)}") # Requires format_move... import
-
         # Ensure king positions are correct after undo
         self.find_kings() # Recalculate king positions just in case
 
@@ -102,27 +97,16 @@ class GameState:
 
     def reset_board(self):
         """Сбрасывает состояние игры к начальному, вызывая __init__."""
-        print("[DEBUG GameState] Resetting board...")
         self.__init__()
-        print("[DEBUG GameState] Board reset complete.")
 
     def copy(self):
         """Создает и возвращает глубокую копию текущего объекта GameState."""
-        if DEBUG_LOG:
-            print(f"[DEBUG GameState.copy] Entered copy() for object with id: {id(self)}")
-            # Сначала копируем критические данные, особенно hands
-            print(f"[DEBUG GameState.copy ENTRY] self.hands = {self.hands}")
         try:
             hands_copy = copy.deepcopy(self.hands)
-            if DEBUG_LOG:
-                print(f"[DEBUG GameState.copy] Result of deepcopy(self.hands): {hands_copy}")
             board_copy = copy.deepcopy(self.board)
             king_pos_copy = copy.deepcopy(self.king_pos)
         except Exception as e:
-            if DEBUG_LOG:
-                print(f"[ERROR GameState.copy] Deepcopy failed: {e}")
-            # В случае ошибки вернем пустой или базовый стейт, чтобы избежать креша
-            # но это укажет на проблему
+            print(f"[ERROR GameState.copy] Deepcopy failed: {e}")
             hands_copy = {'w':{}, 'b':{}}
             board_copy = [[EMPTY_SQUARE for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
             king_pos_copy = {'w': None, 'b': None}
@@ -152,8 +136,6 @@ class GameState:
         new_state.ai_depth = self.ai_depth
         new_state._all_legal_moves_cache = None
 
-        if DEBUG_LOG:
-            print(f"[DEBUG GameState.copy EXIT] new_state.hands = {new_state.hands}")
         return new_state
 
     def find_kings(self):
@@ -289,7 +271,6 @@ class GameState:
                       if p_upper not in self.hands[moving_color]: self.hands[moving_color][p_upper] = 0
 
                  self.hands[moving_color][captured_type] = self.hands[moving_color].get(captured_type, 0) + 1
-                 # print(f"Captured {target_piece}. {moving_color}'s hand: {self.hands[moving_color]}")
 
         # Update King position if King moved
         if piece.upper() == 'K':
@@ -496,23 +477,23 @@ class GameState:
            Uses the current object's state (self.board, self.hands).
         """
         moves = []
-        drop_moves_generated = [] # Отладка
-        # print(f"[DEBUG Pseudo] Generating pseudo-legal for {color} on board:")
+        drop_moves_generated = []
+
         # for r_idx, row in enumerate(self.board):
         #     print(f"      {r_idx}: {row}")
             
         # Moves from pieces on board
-        if DEBUG_LOG:
-            print(f"[DEBUG Board Check] Checking board for {color} moves...") # Отладка
         for r in range(BOARD_SIZE):
             for f in range(BOARD_SIZE):
                 piece = self.board[r][f] # Используем self.board
                 piece_color = get_piece_color(piece) # Может вернуть None для EMPTY_SQUARE
-                # Отладка проверки фигуры на доске
+
+
                 # if r == 5 and f == 4: # Пример для вывода конкретной клетки (где стоит wK в одном из логов)
                 #    print(f"  Checking ({r},{f}): Piece='{piece}' ({type(piece)}), PieceColor='{piece_color}', ExpectedColor='{color}', EMPTY_SQUARE='{EMPTY_SQUARE}' ({type(EMPTY_SQUARE)})")
                 if piece != EMPTY_SQUARE and piece_color == color:
-                    # print(f"  Found own piece '{piece}' at ({r},{f})") # Отладка
+                    # print(f"  Found own piece '{piece}' at ({r},{f})")
+
                     piece_type = piece.upper()
                     move_func = None
                     if piece_type == PAWN[0]: move_func = self.get_pawn_moves
@@ -524,16 +505,15 @@ class GameState:
 
                     if move_func:
                         # Передаем r, f, color - методы будут использовать self.board
-                        # print(f"    Calling {move_func.__name__} for ({r},{f})") # Отладка
+                        # print(f"    Calling {move_func.__name__} for ({r},{f})")
+
                         piece_moves = move_func(r, f, color)
-                        # print(f"    {move_func.__name__} returned: {piece_moves}") # Отладка
+                        # print(f"    {move_func.__name__} returned: {piece_moves}")
+
                         moves.extend(piece_moves)
 
         # Drop moves from hand
-        # print(f"[DEBUG Drop] Getting drops for {color}. Hand: {self.hands.get(color)}")
         player_hand = self.hands.get(color, {}) # Используем self.hands
-        if DEBUG_LOG:
-            print(f"[DEBUG Drop Check] Checking drops for {color}. Hand: {player_hand}") # Отладка
         if player_hand:
             for piece_type_upper, count in player_hand.items():
                 if count > 0:
@@ -548,18 +528,11 @@ class GameState:
                             continue
                         for f in range(BOARD_SIZE):
                             target_cell = self.board[r][f]
-                            if DEBUG_LOG:
-                                print(f"  Checking drop at ({r},{f}): Cell='{target_cell}' ({type(target_cell)}), EMPTY_SQUARE='{EMPTY_SQUARE}' ({type(EMPTY_SQUARE)}), Comparison Result: {target_cell == EMPTY_SQUARE}")
                             if target_cell == EMPTY_SQUARE:
-                                drop_move = ('drop', piece_code, (r, f)) # Use constructed piece_code
+                                drop_move = ('drop', piece_code, (r, f))
                                 moves.append(drop_move)
-                                drop_moves_generated.append(drop_move) # Отладка
-                    # print(f"[DEBUG Drop] Finished checking drops for {piece_char}") # Отладка
+                                drop_moves_generated.append(drop_move)
 
-        # print(f"[DEBUG Pseudo] Total pseudo-legal moves: {len(moves)}")
-        if DEBUG_LOG:
-            print(f"[DEBUG Pseudo Gen] For {color}, Generated {len(drop_moves_generated)} drop moves: {drop_moves_generated}") # Отладка
-            print(f"[DEBUG Pseudo Gen] For {color}, Total generated pseudo-legal moves: {len(moves)}") # Отладка
         return moves
 
     def get_all_legal_moves(self):
@@ -576,9 +549,6 @@ class GameState:
         # Вызываем generate_all_pseudo_legal_moves для ТЕКУЩЕГО объекта (self)
         # Он использует self.board и self.hands
         pseudo_legal_moves = self.generate_all_pseudo_legal_moves(current_color)
-        # print(f"[DEBUG Legality] Pseudo-legal for {current_color}: {pseudo_legal_moves}")
-        if DEBUG_LOG:
-            print(f"[DEBUG Legality Check] For {current_color}, received {len(pseudo_legal_moves)} pseudo-legal moves to check.") # Отладка
 
         # Для проверки легальности нам все еще нужно симулировать ходы
         # Сохраняем состояние ТЕКУЩЕГО объекта (не нужно, симулируем на копии)
@@ -598,16 +568,15 @@ class GameState:
                  is_check_after = temp_game_state.is_in_check(current_color)
                  if not is_check_after:
                       legal_moves.append(move) # Ход легален
-                 # else: # Отладка - почему ход нелегален
+                 # else:
+
                  #    print(f"[DEBUG Legality Check] Move {move} for {current_color} is ILLEGAL (king in check after)")
-            # else: # Отладка - почему ход не сделался
+            # else:
+
             #    print(f"[DEBUG Legality Check] Move {move} for {current_color} FAILED simulation (make_move returned False)")
             # --- Конец новой симуляции ---
 
         self._all_legal_moves_cache = legal_moves
-        # print(f"[DEBUG Legality] Legal moves for {current_color}: {legal_moves}")
-        if DEBUG_LOG:
-            print(f"[DEBUG Legality Check] For {current_color}, Found {len(legal_moves)} legal moves after filtering.") # Отладка
         return legal_moves
 
     def is_in_check(self, color):
@@ -665,7 +634,6 @@ class GameState:
         for df_attack in [-1, 1]:
             pr, pf = r - pawn_dir, f + df_attack # Check squares where attacker pawn could be
             if is_on_board(pr, pf) and self.board[pr][pf] == pawn_piece:
-                 # print(f"Debug: Square {r},{f} attacked by {pawn_piece} at {pr},{pf}")
                  return True
 
         # Check Knights
@@ -673,7 +641,6 @@ class GameState:
         for dr, df in KNIGHT_MOVES:
             nr, nf = r + dr, f + df
             if is_on_board(nr, nf) and self.board[nr][nf] == knight_piece:
-                 # print(f"Debug: Square {r},{f} attacked by {knight_piece} at {nr},{nf}")
                  return True
 
         # Check Sliding Pieces (Bishops, Rooks, Queens)
@@ -688,7 +655,6 @@ class GameState:
                 piece = self.board[cr][cf]
                 if piece != EMPTY_SQUARE:
                     if piece == bishop_piece or piece == queen_piece:
-                         # print(f"Debug: Square {r},{f} attacked by {piece} at {cr},{cf}")
                          return True
                     break # Path blocked
                 cr, cf = cr + dr, cf + df
@@ -700,7 +666,6 @@ class GameState:
                 piece = self.board[cr][cf]
                 if piece != EMPTY_SQUARE:
                     if piece == rook_piece or piece == queen_piece:
-                         # print(f"Debug: Square {r},{f} attacked by {piece} at {cr},{cf}")
                          return True
                     break # Path blocked
                 cr, cf = cr + dr, cf + df
@@ -710,7 +675,6 @@ class GameState:
         for dr, df in KING_MOVES:
             kr, kf = r + dr, f + df
             if is_on_board(kr, kf) and self.board[kr][kf] == king_piece:
-                 # print(f"Debug: Square {r},{f} attacked by {king_piece} at {kr},{kf}")
                  return True
 
         return False

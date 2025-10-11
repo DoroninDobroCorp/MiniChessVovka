@@ -804,7 +804,6 @@ def minimax(gamestate: GameState, depth, move_cache):
         for move, score in all_results:
             # Check for exact mating score
             if score == mating_score:
-                print(f"[DEBUG Minimax Main] Found FORCED MATE move: {format_move_for_print(move)}")
                 best_mate_move = move
                 break # Found the best possible outcome
 
@@ -903,7 +902,6 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
             # <<< Mate Check >>>
             if eval_score >= CHECKMATE_SCORE: 
                 # This move leads to White checkmating Black
-                #print(f"[DEBUG MaxRec] Found mate via {format_move_for_print(move)} -> Score: {CHECKMATE_SCORE}")
                 return CHECKMATE_SCORE # Return mate score immediately
             
             max_eval = max(max_eval, eval_score)
@@ -923,7 +921,6 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
             # <<< Mate Check >>>
             if eval_score <= -CHECKMATE_SCORE:
                  # This move leads to Black checkmating White
-                 #print(f"[DEBUG MinRec] Found mate via {format_move_for_print(move)} -> Score: {-CHECKMATE_SCORE}")
                  return -CHECKMATE_SCORE # Return mate score immediately
             
             min_eval = min(min_eval, eval_score)
@@ -965,7 +962,6 @@ def _quiescence_search(gamestate: GameState, alpha, beta, maximizing_player, dep
              
              # <<< Mate Check >>>
              if score >= CHECKMATE_SCORE:
-                 #print(f"[DEBUG QMax] Found mate via {format_move_for_print(move)} -> Score: {CHECKMATE_SCORE}")
                  return CHECKMATE_SCORE # Return mate immediately
                  
              alpha = max(alpha, score)
@@ -988,7 +984,6 @@ def _quiescence_search(gamestate: GameState, alpha, beta, maximizing_player, dep
              
              # <<< Mate Check >>>
              if score <= -CHECKMATE_SCORE:
-                 #print(f"[DEBUG QMin] Found mate via {format_move_for_print(move)} -> Score: {-CHECKMATE_SCORE}")
                  return -CHECKMATE_SCORE # Return mate immediately
                  
              beta = min(beta, score)

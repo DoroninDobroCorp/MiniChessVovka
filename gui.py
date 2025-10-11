@@ -147,27 +147,15 @@ def load_images(image_dir=".", target_piece_size=int(SQUARE_SIZE * 0.9)):
                 resized_black_image = resize_image(original_image, SQUARE_SIZE)
                 PIECE_IMAGES[black_piece_char] = resized_black_image
                 print(f"    -> Stored as '{black_piece_char}'")
-                # --- DEBUG BISHOP --- 
-                if black_piece_char == 'b':
-                    print(f"    [DEBUG] Bishop 'b' added to PIECE_IMAGES: {isinstance(PIECE_IMAGES.get('b'), pygame.Surface)}")
-                # --- END DEBUG ---
 
                 # Create and store white piece image by converting colors
-                converted_white_image = invert_surface_colors(resized_black_image) # Use the new function name
+                converted_white_image = invert_surface_colors(resized_black_image)
                 PIECE_IMAGES[white_piece_char] = converted_white_image
                 print(f"    -> Converted and stored as '{white_piece_char}'")
-                # --- DEBUG BISHOP --- 
-                if white_piece_char == 'B':
-                    print(f"    [DEBUG] Bishop 'B' added to PIECE_IMAGES: {isinstance(PIECE_IMAGES.get('B'), pygame.Surface)}")
-                # --- END DEBUG ---
                 found_files += 1
 
             except Exception as e:
                 print(f"!! Error processing image {filepath}: {e}")
-                # --- DEBUG BISHOP --- 
-                if black_piece_char == 'b': # Also print error if bishop fails
-                    print(f"    [DEBUG] Error specifically during bishop processing.")
-                # --- END DEBUG ---
         else:
             print(f"!! Warning: Image file not found: {filepath}")
 

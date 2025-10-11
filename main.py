@@ -46,12 +46,20 @@ def main():
     print("Окно создано")
 
     # Загрузка изображений (Function is in gui.py)
-    # <<< Изображения лежат в корне, вызываем без image_dir >>>
-    if not load_images(): 
-        print("Ошибка загрузки изображений! Убедитесь, что файлы .png лежат в корневой папке проекта.")
+    try:
+        if not load_images(): 
+            print("КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить изображения фигур!")
+            print("Убедитесь, что следующие файлы находятся в корневой папке проекта:")
+            print("  - pawn.png, horse.png, bishop.png, rookie.png, king.png")
+            pygame.quit()
+            sys.exit(1)
+        print("Изображения загружены")
+    except Exception as e:
+        print(f"КРИТИЧЕСКАЯ ОШИБКА при загрузке изображений: {e}")
+        import traceback
+        traceback.print_exc()
         pygame.quit()
-        sys.exit()
-    print("Изображения загружены")
+        sys.exit(1)
 
     # Инициализация игры
     gamestate = GameState()
@@ -103,6 +111,16 @@ def main():
             if ai_best_move:
                 print(f"AI making move: {format_move_for_print(ai_best_move)}")
                 move_success = gamestate.make_move(ai_best_move)
+        else:
+                print("!!! AI returned None - selecting random legal move as fallback")
+                legal_moves = gamestate.get_all_legal_moves()
+                if legal_moves:
+                    ai_best_move = random.choice(legal_moves)
+                    print(f"AI fallback move: {format_move_for_print(ai_best_move)}")
+                    move_success = gamestate.make_move(ai_best_move)
+                else:
+                    print("!!! No legal moves available - game should be over")
+                    move_success = False
 
                 if move_success:
                     if gamestate.needs_promotion_choice:
@@ -115,15 +133,6 @@ def main():
                     ai.save_move_cache_to_db(ai.move_cache) # <<< Используем новую функцию и переменную
                 else:
                     print(f"!!! Error executing AI move: {format_move_for_print(ai_best_move)}")
-            else:
-                print("!!! AI failed to find a move.")
-                if not (gamestate.checkmate or gamestate.stalemate):
-                     print("!!! AI returned None move in non-terminal state.")
-                     legal = gamestate.get_all_legal_moves()
-                     if legal:
-                         rand_move = random.choice(legal)
-                         print(f"AI Error - picking random move: {format_move_for_print(rand_move)}")
-                         if gamestate.make_move(rand_move): gamestate.save_state()
 
         # --- Handle Pygame Events ---
         clicked_button_info = None
@@ -140,14 +149,6 @@ def main():
             # Process clicks only if AI is not currently calculating its move
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not making_ai_move:
                  mouse_pos = event.pos # Use event's position for click
-
-                 # --- DEBUG PRINT START ---
-                 print(f"\n[DEBUG main] Click detected at: {mouse_pos}")
-                 if 'hand_pieces' in ui_elements:
-                     print(f"[DEBUG main] Hand rects data: {ui_elements['hand_pieces'].get(gamestate.current_turn, {})}")
-                 else:
-                     print("[DEBUG main] No 'hand_pieces' in ui_elements!")
-                 # --- DEBUG PRINT END ---
 
                  # --- Check standard UI buttons --- 
                  clicked_button_info = None
@@ -182,7 +183,6 @@ def main():
                          logical_col = screen_col
 
                      clicked_square = (logical_row, logical_col)
-                     print(f"[DEBUG] Click on screen at ({screen_row}, {screen_col}), logical ({logical_row}, {logical_col}), flipped={board_flipped}") # Отладка
                      # Don't continue yet, need to check hand piece click first or handle board click
                      # if gamestate.selected_drop_piece: continue # Drop target handled below
                      # else: continue # Board selection handled below
@@ -245,13 +245,10 @@ def main():
                       ai_thread = AIThread(gamestate, gamestate.ai_depth)
                       ai_thread.start()
             elif clicked_button_info == 'toggle_black_ai':
-                 print(f"[DEBUG] Clicked 'toggle_black_ai'. Current state: {gamestate.black_ai_enabled}") # DEBUG
                  gamestate.black_ai_enabled = not gamestate.black_ai_enabled
-                 print(f"[DEBUG] Toggled. New state: {gamestate.black_ai_enabled}") # DEBUG
                  print(f"Black AI: {gamestate.black_ai_enabled}")
                  # If black's turn and AI is now enabled, trigger AI move
                  if gamestate.current_turn == 'b' and gamestate.black_ai_enabled and not making_ai_move:
-                      print("[DEBUG] Triggering AI move for Black immediately after enabling.") # DEBUG
                       making_ai_move = True
                       ai_thread = AIThread(gamestate, gamestate.ai_depth)
                       ai_thread.start()
@@ -307,7 +304,6 @@ def main():
                     # Move format: ('drop', 'wN', (r, f))
                     if move[0] == 'drop' and move[1] == full_piece_code:
                         gamestate.highlighted_moves.append(move)
-                print(f"[DEBUG] Highlighted drop moves for {full_piece_code}: {gamestate.highlighted_moves}") # Use full code
             clicked_hand_piece_type = None
 
         # Handle Board Click
