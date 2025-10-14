@@ -111,7 +111,7 @@ def main():
             if ai_best_move:
                 print(f"AI making move: {format_move_for_print(ai_best_move)}")
                 move_success = gamestate.make_move(ai_best_move)
-        else:
+            else:
                 print("!!! AI returned None - selecting random legal move as fallback")
                 legal_moves = gamestate.get_all_legal_moves()
                 if legal_moves:
@@ -122,17 +122,17 @@ def main():
                     print("!!! No legal moves available - game should be over")
                     move_success = False
 
-                if move_success:
-                    if gamestate.needs_promotion_choice:
-                        print("!!! AI move resulted in promotion choice needed - AI should have chosen!")
-                        prom_char = 'R' if get_opposite_color(gamestate.current_turn) == 'w' else 'r'
-                        gamestate.complete_promotion(prom_char)
-                    gamestate.save_state()
-                    print("AI move successful.")
-                    # <<< 2. Сохраняем КЭШ ХОДОВ в БД после успешного хода ИИ >>>
-                    ai.save_move_cache_to_db(ai.move_cache) # <<< Используем новую функцию и переменную
-                else:
-                    print(f"!!! Error executing AI move: {format_move_for_print(ai_best_move)}")
+            if move_success:
+                if gamestate.needs_promotion_choice:
+                    print("!!! AI move resulted in promotion choice needed - AI should have chosen!")
+                    prom_char = 'R' if get_opposite_color(gamestate.current_turn) == 'w' else 'r'
+                    gamestate.complete_promotion(prom_char)
+                gamestate.save_state()
+                print("AI move successful.")
+                # <<< 2. Сохраняем КЭШ ХОДОВ в БД после успешного хода ИИ >>>
+                ai.save_move_cache_to_db(ai.move_cache) # <<< Используем новую функцию и переменную
+            else:
+                print(f"!!! Error executing AI move: {format_move_for_print(ai_best_move)}")
 
         # --- Handle Pygame Events ---
         clicked_button_info = None

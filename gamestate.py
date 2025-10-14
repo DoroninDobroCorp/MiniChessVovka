@@ -29,9 +29,10 @@ class GameState:
         self.needs_promotion_choice = False
         self.promotion_square = None
         self.last_move_for_promotion = None
-        self.white_ai_enabled = False
-        self.black_ai_enabled = True
-        self.ai_depth = 16  # Increased for stronger play
+        # По умолчанию: оба игрока - люди (AI можно включить через кнопки в GUI)
+        self.white_ai_enabled = False  # По умолчанию: игрок играет за белых
+        self.black_ai_enabled = False  # По умолчанию: игрок играет за черных (включи AI кнопкой!)
+        self.ai_depth = 6  # Conservative depth with proper caching (deepcopy is slow, needs optimization)
         self.show_hint = False # Note: show_hint itself is global in main.py
         self._all_legal_moves_cache = None
         self._is_check_cache = None
@@ -136,6 +137,34 @@ class GameState:
         new_state.ai_depth = self.ai_depth
         new_state._all_legal_moves_cache = None
 
+        return new_state
+
+    def fast_copy_for_simulation(self):
+        """Быстрая копия только для AI симуляции - не копирует историю и UI состояние"""
+        new_state = GameState()
+        
+        # Быстрое копирование board (списков)
+        new_state.board = [row[:] for row in self.board]
+        
+        # Быстрое копирование hands (словарей)
+        new_state.hands = {
+            'w': dict(self.hands.get('w', {})),
+            'b': dict(self.hands.get('b', {}))
+        }
+        
+        # Копирование king_pos
+        new_state.king_pos = dict(self.king_pos)
+        
+        # Простые атрибуты
+        new_state.current_turn = self.current_turn
+        new_state.checkmate = self.checkmate
+        new_state.stalemate = self.stalemate
+        new_state.needs_promotion_choice = self.needs_promotion_choice
+        new_state.promotion_square = self.promotion_square
+        
+        # НЕ копируем: saved_states, move_log, UI элементы, кеши
+        # Это делает копирование в ~10-20 раз быстрее
+        
         return new_state
 
     def find_kings(self):

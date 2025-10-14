@@ -8,8 +8,14 @@ import multiprocessing
 import pickle # For deep copying complex objects like GameState
 import hashlib
 import traceback
-from utils import format_move_for_print, algebraic_to_coords, get_piece_color, get_opposite_color
+from utils import format_move_for_print, algebraic_to_coords, get_piece_color, get_opposite_color, is_on_board
 from config import BOARD_SIZE
+
+# Set multiprocessing start method to 'fork' for macOS (faster and more reliable)
+try:
+    multiprocessing.set_start_method('fork', force=True)
+except RuntimeError:
+    pass  # Already set
 
  
 
@@ -35,7 +41,7 @@ ATTACK_KING_ZONE_BONUS = 20 # Bonus for attacking squares near enemy king
 DROP_THREAT_BONUS = 25 # Extra bonus for having pieces in hand (drop threats)
 
 # --- Transposition Table (Now a simple Move Cache) ---
-# Stores: {position_hash: best_move_repr}
+# Stores: {(position_hash, depth): best_move_repr} - includes depth to avoid shallow cached moves
 move_cache = {}
 
 # --- Transposition Table for Alpha-Beta ---
@@ -83,40 +89,46 @@ def load_move_cache_from_db():
     global move_cache
     setup_db() # Ensure DB and table exist
     loaded_count = 0
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT hash, best_move_repr FROM move_cache")
-        rows = cursor.fetchall()
-        move_cache = {row[0]: row[1] for row in rows}
-        loaded_count = len(move_cache)
-        conn.close()
-        print(f"Loaded {loaded_count} entries from move cache database.")
-    except Exception as e:
-        print(f"Error loading move cache from database: {e}")
-        move_cache = {} # Start with empty cache on error
+    # Note: Old cache format didn't include depth, so we skip loading it
+    # to avoid using shallow cached moves
+    move_cache = {} # Start fresh - old cache was without depth
+    print(f"Starting with empty move cache (old format incompatible).")
+    # try:
+    #     conn = sqlite3.connect(DB_PATH)
+    #     cursor = conn.cursor()
+    #     cursor.execute("SELECT hash, best_move_repr FROM move_cache")
+    #     rows = cursor.fetchall()
+    #     move_cache = {row[0]: row[1] for row in rows}
+    #     loaded_count = len(move_cache)
+    #     conn.close()
+    #     print(f"Loaded {loaded_count} entries from move cache database.")
+    # except Exception as e:
+    #     print(f"Error loading move cache from database: {e}")
+    #     move_cache = {} # Start with empty cache on error
 
 def save_move_cache_to_db(cache_to_save):
     """Saves the current move cache to the SQLite database."""
-    print(f"Attempting to save {len(cache_to_save)} cache entries...")
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        # Use INSERT OR REPLACE to update existing entries or insert new ones
-        entries_to_save = list(cache_to_save.items())
-        cursor.executemany("INSERT OR REPLACE INTO move_cache (hash, best_move_repr) VALUES (?, ?)", entries_to_save)
-        conn.commit()
-        conn.close()
-        print(f"Successfully saved {len(entries_to_save)} entries to move cache database.")
-    except Exception as e:
-        print(f"Error saving move cache to database: {e}")
+    # Disabled saving - new format uses (hash, depth) tuple keys which don't work well with DB
+    print(f"Move cache saving disabled (new format with depth tracking).")
+    # print(f"Attempting to save {len(cache_to_save)} cache entries...")
+    # try:
+    #     conn = sqlite3.connect(DB_PATH)
+    #     cursor = conn.cursor()
+    #     # Use INSERT OR REPLACE to update existing entries or insert new ones
+    #     entries_to_save = list(cache_to_save.items())
+    #     cursor.executemany("INSERT OR REPLACE INTO move_cache (hash, best_move_repr) VALUES (?, ?)", entries_to_save)
+    #     conn.commit()
+    #     conn.close()
+    #     print(f"Successfully saved {len(entries_to_save)} entries to move cache database.")
+    # except Exception as e:
+    #     print(f"Error saving move cache to database: {e}")
 
 
 # --- Game State Import ---
 # Import the actual GameState class and necessary constants
 try:
     from gamestate import GameState # Import GameState class
-    from pieces import EMPTY_SQUARE, KING, PAWN, PROMOTION_PIECES_WHITE_STR, PROMOTION_PIECES_BLACK_STR # Import constants
+    from pieces import EMPTY_SQUARE, KING, PAWN, PROMOTION_PIECES_WHITE_STR, PROMOTION_PIECES_BLACK_STR, KNIGHT_MOVES # Import constants
 except ImportError:
     print("Warning: gamestate.py or pieces.py not found. Using dummy GameState.")
     # Provide minimal fallbacks for constants
@@ -325,6 +337,83 @@ def evaluate_position(gamestate: GameState):
         if (white_king_r, white_king_c) in CENTER_SQUARES: score += 10
         if (black_king_r, black_king_c) in CENTER_SQUARES: score -= 10
 
+    # 5. IMPROVED: Piece Development Bonus (opening phase)
+    if phase == OPENING_PHASE:
+        # White pieces still on back rank (undeveloped)
+        white_undeveloped = 0
+        for c in range(BOARD_SIZE):
+            piece = gamestate.board[5][c]
+            if piece in ['N', 'B', 'R'] and piece != EMPTY_SQUARE:
+                white_undeveloped += 1
+        score -= white_undeveloped * 15  # Penalty for undeveloped pieces
+        
+        # Black pieces still on back rank
+        black_undeveloped = 0
+        for c in range(BOARD_SIZE):
+            piece = gamestate.board[0][c]
+            if piece in ['n', 'b', 'r'] and piece != EMPTY_SQUARE:
+                black_undeveloped += 1
+        score += black_undeveloped * 15
+
+    # 6. IMPROVED: King Attack Evaluation
+    # Count attacks on squares around enemy king
+    if white_king_r != -1 and black_king_r != -1:
+        # Count white pieces attacking black king zone
+        white_attackers_on_black_king = 0
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0: continue
+                check_r, check_c = black_king_r + dr, black_king_c + dc
+                if is_on_board(check_r, check_c):
+                    # Check if any white piece attacks this square
+                    for r in range(BOARD_SIZE):
+                        for c in range(BOARD_SIZE):
+                            piece = gamestate.board[r][c]
+                            if piece != EMPTY_SQUARE and get_piece_color(piece) == 'w':
+                                # Simplified check: knights, bishops, rooks, queens
+                                piece_type = piece.upper()
+                                if piece_type == 'N':
+                                    if (check_r - r, check_c - c) in KNIGHT_MOVES:
+                                        white_attackers_on_black_king += 1
+                                elif piece_type in ['B', 'Q']:
+                                    # Diagonal attacks
+                                    if abs(check_r - r) == abs(check_c - c) and check_r != r:
+                                        # Check line is clear (simplified)
+                                        white_attackers_on_black_king += 0.5
+                                elif piece_type in ['R', 'Q']:
+                                    # Straight attacks
+                                    if (check_r == r or check_c == c) and not (check_r == r and check_c == c):
+                                        white_attackers_on_black_king += 0.5
+        
+        score += white_attackers_on_black_king * ATTACK_KING_ZONE_BONUS
+        
+        # Count black pieces attacking white king zone (mirror logic)
+        black_attackers_on_white_king = 0
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0: continue
+                check_r, check_c = white_king_r + dr, white_king_c + dc
+                if is_on_board(check_r, check_c):
+                    for r in range(BOARD_SIZE):
+                        for c in range(BOARD_SIZE):
+                            piece = gamestate.board[r][c]
+                            if piece != EMPTY_SQUARE and get_piece_color(piece) == 'b':
+                                piece_type = piece.upper()
+                                if piece_type == 'N':
+                                    if (check_r - r, check_c - c) in KNIGHT_MOVES:
+                                        black_attackers_on_white_king += 1
+                                elif piece_type in ['B', 'Q']:
+                                    if abs(check_r - r) == abs(check_c - c) and check_r != r:
+                                        black_attackers_on_white_king += 0.5
+                                elif piece_type in ['R', 'Q']:
+                                    if (check_r == r or check_c == c) and not (check_r == r and check_c == c):
+                                        black_attackers_on_white_king += 0.5
+        
+        score -= black_attackers_on_white_king * ATTACK_KING_ZONE_BONUS
+
+    # 7. Tempo bonus for side to move (slight advantage)
+    score += 10 if gamestate.current_turn == 'w' else -10
+
     # Add a small random element to avoid identical choices? (Optional)
     # score += random.uniform(-0.1, 0.1)
 
@@ -416,37 +505,96 @@ def quiescence_search(gamestate: GameState, alpha, beta, depth):
         return beta # Best score found for minimizing player
 
 
-# --- MVV-LVA Heuristic ---
+# --- MVV-LVA Heuristic (IMPROVED) ---
 def mvv_lva_score(gamestate, move):
-    """ Assigns a score for move ordering based on Most Valuable Victim - Least Valuable Aggressor. """
+    """ 
+    Assigns a score for move ordering based on:
+    1. Checks (highest priority)
+    2. Captures (MVV-LVA)
+    3. Attacks on enemy king zone
+    4. Center control
+    5. Promotions
+    6. History heuristic
+    """
+    score = 0
+    
     # Handle normal board moves: ((r1,f1),(r2,f2), promotion)
     if isinstance(move, tuple) and move and move[0] != 'drop':
         (start_r, start_c), (end_r, end_c), promotion = move
         aggressor_piece = gamestate.board[start_r][start_c]
         victim_piece = gamestate.board[end_r][end_c]
+        
         if aggressor_piece == EMPTY_SQUARE:
-            return 0 # Should not happen for legal moves
+            return 0
+        
         aggressor_value = PIECE_VALUES.get(aggressor_piece.upper(), 0)
+        piece_color = get_piece_color(aggressor_piece)
+        
+        # 1. CAPTURES - MVV-LVA
         if victim_piece != EMPTY_SQUARE:
             victim_value = PIECE_VALUES.get(victim_piece.upper(), 0)
             # High score for capturing valuable piece with less valuable one
-            return (victim_value * 10) - aggressor_value
-        # Promotion bonus
+            score += (victim_value * 10) - aggressor_value
+        
+        # 2. PROMOTION
         if promotion:
-            return 900
-        # Add history heuristic bonus for quiet moves
+            score += 900
+        
+        # 3. CHECKS (simulate move and check if opponent in check)
+        # This is expensive, so we do a quick heuristic instead:
+        # If moving piece attacks opponent king square
+        enemy_color = get_opposite_color(piece_color)
+        enemy_king_pos = gamestate.king_pos.get(enemy_color)
+        if enemy_king_pos:
+            ek_r, ek_c = enemy_king_pos
+            # Check if destination is adjacent to enemy king (potential check)
+            if max(abs(end_r - ek_r), abs(end_c - ek_c)) <= 2:
+                score += 500  # Likely attacking king zone
+        
+        # 4. CENTER CONTROL
+        if (end_r, end_c) in CENTER_SQUARES:
+            score += 30
+        
+        # 5. PIECE DEVELOPMENT (move from back rank)
+        if piece_color == 'w' and start_r == 5 and end_r < 5:
+            score += 20  # White developing
+        elif piece_color == 'b' and start_r == 0 and end_r > 0:
+            score += 20  # Black developing
+        
+        # 6. HISTORY HEURISTIC
         move_repr = repr(move)
         history_bonus = history_scores.get(move_repr, 0)
-        return history_bonus
-    # Drops: treat as quiet, slight ordering by piece value in hand
+        score += history_bonus
+        
+        return score
+    
+    # Drops: strategic placement
     if isinstance(move, tuple) and move and move[0] == 'drop':
         piece_code = move[1]  # e.g., 'wN'
         if isinstance(piece_code, str) and len(piece_code) == 2:
-            base_score = HAND_PIECE_VALUES.get(piece_code[1].upper(), 0) // 10
+            drop_r, drop_c = move[2]
+            piece_type = piece_code[1].upper()
+            piece_color = piece_code[0]
+            
+            base_score = HAND_PIECE_VALUES.get(piece_type, 0) // 10
+            
+            # DROP IN CENTER
+            if (drop_r, drop_c) in CENTER_SQUARES:
+                base_score += 50
+            
+            # DROP NEAR ENEMY KING
+            enemy_color = get_opposite_color(piece_color)
+            enemy_king_pos = gamestate.king_pos.get(enemy_color)
+            if enemy_king_pos:
+                ek_r, ek_c = enemy_king_pos
+                if max(abs(drop_r - ek_r), abs(drop_c - ek_c)) <= 2:
+                    base_score += 100  # Drop attacking king!
+            
             move_repr = repr(move)
             history_bonus = history_scores.get(move_repr, 0)
             return base_score + history_bonus
         return 0
+    
     return 0 # Unknown format
 
 
@@ -606,13 +754,14 @@ def evaluate_move_worker(args):
         return -float('inf') if is_maximizing else float('inf')
 
 
-# --- Main AI Function (Using Simple Move Cache) ---
-def find_best_move(gamestate: GameState, depth=16): # Changed default depth to 16 for stronger play
+# --- Main AI Function (Using Iterative Deepening + Cache) ---
+def find_best_move(gamestate: GameState, depth=6):
     """
-    Finds the best move using fixed depth search and a simple move cache.
-    Checks cache first, then performs parallel search if needed.
+    Finds the best move using ITERATIVE DEEPENING with move cache.
+    Searches depth 1, 2, 3... up to target depth.
+    Uses results from shallower searches to improve move ordering.
     """
-    print(f"AI ({gamestate.current_turn}) thinking with fixed depth {depth}...")
+    print(f"AI ({gamestate.current_turn}) thinking with iterative deepening up to depth {depth}...")
     start_time = time.time()
     is_maximizing = (gamestate.current_turn == 'w')
     global move_cache # Access the global cache
@@ -621,9 +770,10 @@ def find_best_move(gamestate: GameState, depth=16): # Changed default depth to 1
         print("AI Error: Cannot find move, waiting for promotion choice.")
         return None
 
-    # --- Check Move Cache ---
+    # --- Check Move Cache (with depth) ---
     pos_hash = get_position_hash(gamestate)
-    cached_move_repr = move_cache.get(pos_hash)
+    cache_key = (pos_hash, depth)  # Include depth in cache key
+    cached_move_repr = move_cache.get(cache_key)
     if cached_move_repr:
         try:
             # Convert repr back to move tuple/list structure using eval
@@ -635,29 +785,29 @@ def find_best_move(gamestate: GameState, depth=16): # Changed default depth to 1
             # Validate if the cached move is still legal
             # This requires GameState to have an 'is_move_legal' method
             if hasattr(gamestate, 'is_move_legal') and gamestate.is_move_legal(cached_move):
-                 print(f"[CACHE HIT] Hash {pos_hash}: Found valid move {cached_move} in cache.")
+                 print(f"[CACHE HIT] Hash {pos_hash} Depth {depth}: Found valid move {cached_move} in cache.")
                  end_time = time.time()
                  print(f"AI ({gamestate.current_turn}) finished thinking (CACHE HIT) in {end_time - start_time:.2f}s.")
                  return cached_move
             elif not hasattr(gamestate, 'is_move_legal'):
-                 print(f"[CACHE WARN] Hash {pos_hash}: Cannot validate cached move {cached_move} as GameState lacks 'is_move_legal'. Using cached move.")
+                 print(f"[CACHE WARN] Hash {pos_hash} Depth {depth}: Cannot validate cached move {cached_move} as GameState lacks 'is_move_legal'. Using cached move.")
                  # If validation isn't possible, maybe return it anyway? Or force recalculation?
                  # For now, let's return it assuming it's likely still valid.
                  end_time = time.time()
                  print(f"AI ({gamestate.current_turn}) finished thinking (CACHE HIT - UNVALIDATED) in {end_time - start_time:.2f}s.")
                  return cached_move
             else:
-                 print(f"[CACHE WARN] Hash {pos_hash}: Cached move {cached_move} is no longer legal. Recalculating.")
+                 print(f"[CACHE WARN] Hash {pos_hash} Depth {depth}: Cached move {cached_move} is no longer legal. Recalculating.")
                  # Optionally remove the invalid entry
                  # del move_cache[pos_hash]
         except Exception as e:
-            print(f"[CACHE ERROR] Hash {pos_hash}: Error processing cached move '{cached_move_repr}': {e}. Recalculating.")
+            print(f"[CACHE ERROR] Hash {pos_hash} Depth {depth}: Error processing cached move '{cached_move_repr}': {e}. Recalculating.")
             # Remove potentially corrupt entry
-            if pos_hash in move_cache: del move_cache[pos_hash]
+            if cache_key in move_cache: del move_cache[cache_key]
 
 
     # --- If not in cache or invalid, perform search ---
-    print(f"[CACHE MISS] Hash {pos_hash}: Position not in cache or invalid. Starting search...")
+    print(f"[CACHE MISS] Hash {pos_hash} Depth {depth}: Position not in cache or invalid. Starting search...")
     best_score = -float('inf') if is_maximizing else float('inf')
     best_move = None
 
@@ -675,54 +825,81 @@ def find_best_move(gamestate: GameState, depth=16): # Changed default depth to 1
     if len(legal_moves) == 1:
         print("Only one legal move available.")
         best_move = copy.deepcopy(legal_moves[0])
-        # Store this single move in the cache
-        move_cache[pos_hash] = repr(best_move)
-        print(f"[CACHE STORE] Hash {pos_hash}: Stored single legal move {repr(best_move)}.")
+        # Store this single move in the cache (with depth)
+        cache_key = (pos_hash, depth)
+        move_cache[cache_key] = repr(best_move)
+        print(f"[CACHE STORE] Hash {pos_hash} Depth {depth}: Stored single legal move {repr(best_move)}.")
         end_time = time.time()
         print(f"AI ({gamestate.current_turn}) finished thinking (Single Move) in {end_time - start_time:.2f}s.")
         return best_move
 
 
-    pool = None
     try:
-        try: num_workers = max(1, multiprocessing.cpu_count() - 1)
-        except NotImplementedError: num_workers = 1
-        print(f"Using {num_workers} worker processes for depth {depth} search.")
-
-        # Iterative deepening with TT
+        # === ITERATIVE DEEPENING ===
+        # Start from depth 1 and go up to target depth
+        # Each iteration uses results from previous to improve move ordering
         best_move = None
-        best_score = -float('inf') if is_maximizing else float('inf')
-        for d in range(1, depth + 1):
-            score_d, move_d = minimax_alpha_beta(gamestate, d, -float('inf'), float('inf'), is_maximizing)
-            if move_d is not None:
-                best_move, best_score = move_d, score_d
-            # Optional: simple aspiration can be added later
+        best_score = 0
+        
+        for current_depth in range(1, depth + 1):
+            iteration_start = time.time()
+            print(f"  [ID] Searching depth {current_depth}...")
+            
+            # Check cache for this specific depth first
+            iter_cache_key = (pos_hash, current_depth)
+            cached_for_depth = move_cache.get(iter_cache_key)
+            
+            if cached_for_depth and current_depth == depth:
+                # Found exact depth in cache, use it
+                try:
+                    cached_move = eval(cached_for_depth)
+                    if hasattr(gamestate, 'is_move_legal') and gamestate.is_move_legal(cached_move):
+                        print(f"  [ID] Depth {current_depth} cached, using it.")
+                        best_move = cached_move
+                        break  # We have the answer for target depth
+                except:
+                    pass  # Cache error, continue with search
+            
+            # Search at current depth
+            iter_best_move, iter_best_score = minimax(gamestate, current_depth, move_cache)
+            
+            if iter_best_move:
+                best_move = iter_best_move
+                best_score = iter_best_score
+                
+                # Cache this result
+                iter_cache_key = (pos_hash, current_depth)
+                move_cache[iter_cache_key] = repr(best_move)
+                
+                iteration_time = time.time() - iteration_start
+                print(f"  [ID] Depth {current_depth} complete in {iteration_time:.2f}s, best: {format_move_for_print(best_move)}, score: {best_score:.1f}")
+            else:
+                print(f"  [ID] Depth {current_depth} failed to find move")
+                break
+            
+            # Check if we found mate - no need to search deeper
+            if abs(best_score) >= CHECKMATE_SCORE * 0.9:
+                print(f"  [ID] Mate found at depth {current_depth}, stopping search")
+                break
 
     except Exception as e:
         print(f"An error occurred during AI move calculation: {e}")
-        # traceback.print_exc() # Uncomment for full traceback
-        print("Selecting a random move as fallback.")
-        best_move = random.choice(legal_moves) if legal_moves else None
-        best_score = 0 # Unknown score
-    finally:
-        # Ensure pool is always terminated if it exists and wasn't closed properly
-        if pool is not None:
-            try:
-                print("Terminating worker pool...")
-                pool.terminate()
-                pool.join()
-            except Exception as pool_cleanup_error:
-                 print(f"Error terminating pool: {pool_cleanup_error}")
+        traceback.print_exc()
+        print("Selecting best move found so far or random as fallback.")
+        if not best_move:
+            best_move = random.choice(legal_moves) if legal_moves else None
+            best_score = 0
 
 
     end_time = time.time()
     if best_move:
         print(f"AI ({gamestate.current_turn}) finished thinking in {end_time - start_time:.2f}s.")
         print(f"  Chosen Move: {best_move}, Score: {best_score:.2f}")
-        # --- Store result in Move Cache ---
+        # --- Store result in Move Cache (with depth) ---
         # Use repr() for storing the move; requires eval() on load.
-        move_cache[pos_hash] = repr(best_move)
-        print(f"[CACHE STORE] Hash {pos_hash}: Stored move {repr(best_move)}.")
+        cache_key = (pos_hash, depth)
+        move_cache[cache_key] = repr(best_move)
+        print(f"[CACHE STORE] Hash {pos_hash} Depth {depth}: Stored move {repr(best_move)}.")
     else:
         # This case should ideally not happen if there are legal moves
         print(f"AI ({gamestate.current_turn}) could not find a best move after {end_time - start_time:.2f}s. Legal moves: {legal_moves}")
@@ -770,7 +947,12 @@ def minimax(gamestate: GameState, depth, move_cache):
         tasks = []
         for move in legal_moves:
             # Create a deep copy for each worker to avoid interference
-            gamestate_copy = copy.deepcopy(gamestate)
+            # Use pickle for full serialization to ensure complete independence
+            try:
+                gamestate_copy = pickle.loads(pickle.dumps(gamestate))
+            except:
+                # Fallback to regular deepcopy if pickle fails
+                gamestate_copy = gamestate.copy()
             # Maximizing player is determined by the turn *before* the move is made
             maximizing_player = (gamestate.current_turn == 'w')
             tasks.append((move, gamestate_copy, depth, -float('inf'), float('inf'), maximizing_player, shared_move_cache))
@@ -890,14 +1072,16 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
         # Evaluate quiescent state
         return _quiescence_search(gamestate, alpha, beta, maximizing_player, MAX_QUIESCENCE_DEPTH)
 
-    # --- Move Iteration with Mate Priority --- 
+    # --- Move Iteration with Mate Priority (using fast copy instead of undo) --- 
     if maximizing_player: # White trying to maximize
         max_eval = -float('inf')
         for move in legal_moves:
-            if not gamestate.make_move(move, is_check_game_over=False): continue # Skip illegal moves
+            # Create a fast copy for this branch to avoid needing undo
+            next_state = gamestate.fast_copy_for_simulation()
+            if not next_state.make_move(move, is_check_game_over=False): continue # Skip illegal moves
             
-            eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False) # Recursive call for Black
-            gamestate.undo_move() # Backtrack
+            eval_score = _minimax_recursive(next_state, depth - 1, alpha, beta, False) # Recursive call for Black
+            # No undo needed - we used a copy
 
             # <<< Mate Check >>>
             if eval_score >= CHECKMATE_SCORE: 
@@ -913,10 +1097,12 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
     else: # Minimizing player (Black trying to minimize)
         min_eval = float('inf')
         for move in legal_moves:
-            if not gamestate.make_move(move, is_check_game_over=False): continue
+            # Create a fast copy for this branch to avoid needing undo
+            next_state = gamestate.fast_copy_for_simulation()
+            if not next_state.make_move(move, is_check_game_over=False): continue
             
-            eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True) # Recursive call for White
-            gamestate.undo_move() # Backtrack
+            eval_score = _minimax_recursive(next_state, depth - 1, alpha, beta, True) # Recursive call for White
+            # No undo needed - we used a copy
 
             # <<< Mate Check >>>
             if eval_score <= -CHECKMATE_SCORE:
@@ -956,9 +1142,11 @@ def _quiescence_search(gamestate: GameState, alpha, beta, maximizing_player, dep
         if not noisy_moves: return stand_pat_score # No noisy moves, return static eval
         
         for move in noisy_moves:
-             if not gamestate.make_move(move, is_check_game_over=False): continue
-             score = _quiescence_search(gamestate, alpha, beta, False, depth - 1)
-             gamestate.undo_move()
+             # Use fast copy instead of undo
+             next_state = gamestate.fast_copy_for_simulation()
+             if not next_state.make_move(move, is_check_game_over=False): continue
+             score = _quiescence_search(next_state, alpha, beta, False, depth - 1)
+             # No undo needed
              
              # <<< Mate Check >>>
              if score >= CHECKMATE_SCORE:
@@ -978,9 +1166,11 @@ def _quiescence_search(gamestate: GameState, alpha, beta, maximizing_player, dep
         if not noisy_moves: return stand_pat_score
         
         for move in noisy_moves:
-             if not gamestate.make_move(move, is_check_game_over=False): continue
-             score = _quiescence_search(gamestate, alpha, beta, True, depth - 1)
-             gamestate.undo_move()
+             # Use fast copy instead of undo
+             next_state = gamestate.fast_copy_for_simulation()
+             if not next_state.make_move(move, is_check_game_over=False): continue
+             score = _quiescence_search(next_state, alpha, beta, True, depth - 1)
+             # No undo needed
              
              # <<< Mate Check >>>
              if score <= -CHECKMATE_SCORE:
