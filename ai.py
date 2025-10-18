@@ -755,11 +755,20 @@ def evaluate_move_worker(args):
 
 
 # --- Main AI Function (Using Iterative Deepening + Cache) ---
-def find_best_move(gamestate: GameState, depth=6):
+def find_best_move(gamestate: GameState, depth=6, return_top_n=1):
     """
     Finds the best move using ITERATIVE DEEPENING with move cache.
     Searches depth 1, 2, 3... up to target depth.
     Uses results from shallower searches to improve move ordering.
+    
+    Args:
+        gamestate: Current game state
+        depth: Maximum search depth
+        return_top_n: If > 1, returns list of (move, score) tuples sorted by score
+    
+    Returns:
+        If return_top_n == 1: best_move
+        If return_top_n > 1: list of (move, score) tuples, sorted best to worst
     """
     print(f"AI ({gamestate.current_turn}) thinking with iterative deepening up to depth {depth}...")
     start_time = time.time()
@@ -768,22 +777,17 @@ def find_best_move(gamestate: GameState, depth=6):
 
     if gamestate.needs_promotion_choice:
         print("AI Error: Cannot find move, waiting for promotion choice.")
-        return None
+        return None if return_top_n == 1 else []
 
     # --- Check Move Cache (with depth) ---
     pos_hash = get_position_hash(gamestate)
     cache_key = (pos_hash, depth)  # Include depth in cache key
     cached_move_repr = move_cache.get(cache_key)
-    if cached_move_repr:
+    
+    # Only use cache if we want single best move
+    if return_top_n == 1 and cached_move_repr:
         try:
-            # Convert repr back to move tuple/list structure using eval
-            # WARNING: eval() is a security risk if DB content is not trusted.
-            # Consider safer alternatives like custom serialization/deserialization
-            # or storing moves in a JSON-compatible format if needed.
             cached_move = eval(cached_move_repr)
-
-            # Validate if the cached move is still legal
-            # This requires GameState to have an 'is_move_legal' method
             if hasattr(gamestate, 'is_move_legal') and gamestate.is_move_legal(cached_move):
                  print(f"[CACHE HIT] Hash {pos_hash} Depth {depth}: Found valid move {cached_move} in cache.")
                  end_time = time.time()
@@ -791,85 +795,78 @@ def find_best_move(gamestate: GameState, depth=6):
                  return cached_move
             elif not hasattr(gamestate, 'is_move_legal'):
                  print(f"[CACHE WARN] Hash {pos_hash} Depth {depth}: Cannot validate cached move {cached_move} as GameState lacks 'is_move_legal'. Using cached move.")
-                 # If validation isn't possible, maybe return it anyway? Or force recalculation?
-                 # For now, let's return it assuming it's likely still valid.
                  end_time = time.time()
                  print(f"AI ({gamestate.current_turn}) finished thinking (CACHE HIT - UNVALIDATED) in {end_time - start_time:.2f}s.")
                  return cached_move
             else:
                  print(f"[CACHE WARN] Hash {pos_hash} Depth {depth}: Cached move {cached_move} is no longer legal. Recalculating.")
-                 # Optionally remove the invalid entry
-                 # del move_cache[pos_hash]
         except Exception as e:
             print(f"[CACHE ERROR] Hash {pos_hash} Depth {depth}: Error processing cached move '{cached_move_repr}': {e}. Recalculating.")
-            # Remove potentially corrupt entry
             if cache_key in move_cache: del move_cache[cache_key]
-
 
     # --- If not in cache or invalid, perform search ---
     print(f"[CACHE MISS] Hash {pos_hash} Depth {depth}: Position not in cache or invalid. Starting search...")
     best_score = -float('inf') if is_maximizing else float('inf')
     best_move = None
 
-    # Need a copy to generate moves without altering the original state passed to minimax/workers
     gs_copy_for_moves = copy.deepcopy(gamestate)
     legal_moves = gs_copy_for_moves.get_all_legal_moves()
 
     if not legal_moves:
         print("AI Error: No legal moves available!")
-        # Attempt to evaluate terminal state anyway?
         score = evaluate_position(gamestate)
         print(f"  Terminal state evaluation: {score}")
-        return None # No move to make
+        return None if return_top_n == 1 else []
 
     if len(legal_moves) == 1:
         print("Only one legal move available.")
         best_move = copy.deepcopy(legal_moves[0])
-        # Store this single move in the cache (with depth)
         cache_key = (pos_hash, depth)
         move_cache[cache_key] = repr(best_move)
         print(f"[CACHE STORE] Hash {pos_hash} Depth {depth}: Stored single legal move {repr(best_move)}.")
         end_time = time.time()
         print(f"AI ({gamestate.current_turn}) finished thinking (Single Move) in {end_time - start_time:.2f}s.")
-        return best_move
-
+        return best_move if return_top_n == 1 else [(best_move, 0)]
 
     try:
         # === ITERATIVE DEEPENING ===
-        # Start from depth 1 and go up to target depth
-        # Each iteration uses results from previous to improve move ordering
         best_move = None
         best_score = 0
+        all_move_scores = []  # For return_top_n > 1
         
         for current_depth in range(1, depth + 1):
             iteration_start = time.time()
             print(f"  [ID] Searching depth {current_depth}...")
             
-            # Check cache for this specific depth first
-            iter_cache_key = (pos_hash, current_depth)
-            cached_for_depth = move_cache.get(iter_cache_key)
+            # Check cache for this specific depth first (only if return_top_n == 1)
+            if return_top_n == 1:
+                iter_cache_key = (pos_hash, current_depth)
+                cached_for_depth = move_cache.get(iter_cache_key)
+                
+                if cached_for_depth and current_depth == depth:
+                    try:
+                        cached_move = eval(cached_for_depth)
+                        if hasattr(gamestate, 'is_move_legal') and gamestate.is_move_legal(cached_move):
+                            print(f"  [ID] Depth {current_depth} cached, using it.")
+                            best_move = cached_move
+                            break
+                    except:
+                        pass
             
-            if cached_for_depth and current_depth == depth:
-                # Found exact depth in cache, use it
-                try:
-                    cached_move = eval(cached_for_depth)
-                    if hasattr(gamestate, 'is_move_legal') and gamestate.is_move_legal(cached_move):
-                        print(f"  [ID] Depth {current_depth} cached, using it.")
-                        best_move = cached_move
-                        break  # We have the answer for target depth
-                except:
-                    pass  # Cache error, continue with search
-            
-            # Search at current depth
-            iter_best_move, iter_best_score = minimax(gamestate, current_depth, move_cache)
+            # Search at current depth - returns (best_move, best_score) or (best_move, best_score, all_results)
+            if return_top_n > 1 and current_depth == depth:
+                # For final depth, get all move scores
+                iter_best_move, iter_best_score, all_move_scores = minimax(gamestate, current_depth, move_cache, return_all_scores=True)
+            else:
+                iter_best_move, iter_best_score = minimax(gamestate, current_depth, move_cache)
             
             if iter_best_move:
                 best_move = iter_best_move
                 best_score = iter_best_score
                 
-                # Cache this result
-                iter_cache_key = (pos_hash, current_depth)
-                move_cache[iter_cache_key] = repr(best_move)
+                if return_top_n == 1:
+                    iter_cache_key = (pos_hash, current_depth)
+                    move_cache[iter_cache_key] = repr(best_move)
                 
                 iteration_time = time.time() - iteration_start
                 print(f"  [ID] Depth {current_depth} complete in {iteration_time:.2f}s, best: {format_move_for_print(best_move)}, score: {best_score:.1f}")
@@ -877,7 +874,6 @@ def find_best_move(gamestate: GameState, depth=6):
                 print(f"  [ID] Depth {current_depth} failed to find move")
                 break
             
-            # Check if we found mate - no need to search deeper
             if abs(best_score) >= CHECKMATE_SCORE * 0.9:
                 print(f"  [ID] Mate found at depth {current_depth}, stopping search")
                 break
@@ -890,21 +886,28 @@ def find_best_move(gamestate: GameState, depth=6):
             best_move = random.choice(legal_moves) if legal_moves else None
             best_score = 0
 
-
     end_time = time.time()
     if best_move:
         print(f"AI ({gamestate.current_turn}) finished thinking in {end_time - start_time:.2f}s.")
         print(f"  Chosen Move: {best_move}, Score: {best_score:.2f}")
-        # --- Store result in Move Cache (with depth) ---
-        # Use repr() for storing the move; requires eval() on load.
-        cache_key = (pos_hash, depth)
-        move_cache[cache_key] = repr(best_move)
-        print(f"[CACHE STORE] Hash {pos_hash} Depth {depth}: Stored move {repr(best_move)}.")
+        if return_top_n == 1:
+            cache_key = (pos_hash, depth)
+            move_cache[cache_key] = repr(best_move)
+            print(f"[CACHE STORE] Hash {pos_hash} Depth {depth}: Stored move {repr(best_move)}.")
     else:
-        # This case should ideally not happen if there are legal moves
         print(f"AI ({gamestate.current_turn}) could not find a best move after {end_time - start_time:.2f}s. Legal moves: {legal_moves}")
 
-    return best_move
+    # Return based on return_top_n
+    if return_top_n == 1:
+        return best_move
+    else:
+        # Return top N moves sorted by score
+        if all_move_scores:
+            # Sort: for white (maximizing), descending; for black, ascending
+            all_move_scores.sort(key=lambda x: x[1], reverse=is_maximizing)
+            return all_move_scores[:return_top_n]
+        else:
+            return [(best_move, best_score)] if best_move else []
 
 # --- Add is_move_legal stub if not present in GameState ---
 # This is crucial for cache validation. Add a basic stub if your GameState lacks it.
@@ -927,33 +930,32 @@ if 'GameState' in globals() and not hasattr(GameState, 'is_move_legal'):
 # but ensuring setup runs once might be useful.
 # setup_db() # Let load_move_cache_from_db handle this.
 
-def minimax(gamestate: GameState, depth, move_cache):
-    """Starts the parallel minimax search."""
+def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
+    """Starts the parallel minimax search.
+    
+    Args:
+        return_all_scores: If True, returns (best_move, best_score, all_move_scores_list)
+                          If False, returns (best_move, best_score)
+    """
     try:
         start_time_minimax = time.time()
         legal_moves = gamestate.get_all_legal_moves()
         if not legal_moves:
-            return None, 0 # Or appropriate score for checkmate/stalemate?
+            result = (None, 0, []) if return_all_scores else (None, 0)
+            return result
 
         num_workers = NUM_WORKERS if NUM_WORKERS else multiprocessing.cpu_count()
         print(f"Using {num_workers} worker processes for depth {depth} search.")
         pool = multiprocessing.Pool(processes=num_workers)
         manager = multiprocessing.Manager()
-        # Shared cache for workers (read-only during parallel phase is safer)
-        # For simplicity, we pass a copy or don't share the writeable cache here.
-        # Workers will use their own cache logic based on the passed state.
-        shared_move_cache = manager.dict(move_cache) # Pass current cache state
+        shared_move_cache = manager.dict(move_cache)
 
         tasks = []
         for move in legal_moves:
-            # Create a deep copy for each worker to avoid interference
-            # Use pickle for full serialization to ensure complete independence
             try:
                 gamestate_copy = pickle.loads(pickle.dumps(gamestate))
             except:
-                # Fallback to regular deepcopy if pickle fails
                 gamestate_copy = gamestate.copy()
-            # Maximizing player is determined by the turn *before* the move is made
             maximizing_player = (gamestate.current_turn == 'w')
             tasks.append((move, gamestate_copy, depth, -float('inf'), float('inf'), maximizing_player, shared_move_cache))
 
@@ -963,63 +965,72 @@ def minimax(gamestate: GameState, depth, move_cache):
 
         all_results = []
         for result in results:
-            if result is None: continue # Skip if worker failed badly
+            if result is None: continue
             move, score = result
-            if score is not None: # Check if worker returned a valid score
+            if score is not None:
                 all_results.append((move, score))
 
         if not all_results:
-            # ... (Existing handling for no results) ...
             print("[WARN] Minimax main: No valid scores returned from workers or no legal moves?")
-            if gamestate.checkmate: return None, -CHECKMATE_SCORE if gamestate.current_turn == 'w' else CHECKMATE_SCORE
-            if gamestate.stalemate: return None, STALEMATE_SCORE
-            legal_moves_fallback = gamestate.get_all_legal_moves() # Re-check
-            if not legal_moves_fallback: return None, STALEMATE_SCORE if not gamestate.is_in_check(gamestate.current_turn) else (-CHECKMATE_SCORE if gamestate.current_turn == 'w' else CHECKMATE_SCORE)
-            return random.choice(legal_moves_fallback), -float('inf') # Fallback random, bad score
+            if gamestate.checkmate: 
+                score = -CHECKMATE_SCORE if gamestate.current_turn == 'w' else CHECKMATE_SCORE
+                result = (None, score, []) if return_all_scores else (None, score)
+                return result
+            if gamestate.stalemate:
+                result = (None, STALEMATE_SCORE, []) if return_all_scores else (None, STALEMATE_SCORE)
+                return result
+            legal_moves_fallback = gamestate.get_all_legal_moves()
+            if not legal_moves_fallback:
+                score = STALEMATE_SCORE if not gamestate.is_in_check(gamestate.current_turn) else (-CHECKMATE_SCORE if gamestate.current_turn == 'w' else CHECKMATE_SCORE)
+                result = (None, score, []) if return_all_scores else (None, score)
+                return result
+            fallback_move = random.choice(legal_moves_fallback)
+            result = (fallback_move, -float('inf'), [(fallback_move, -float('inf'))]) if return_all_scores else (fallback_move, -float('inf'))
+            return result
 
-
-        # --- <<<< ПРИОРИТЕТ МАТА >>>> --- 
+        # --- ПРИОРИТЕТ МАТА ---
         current_player_color = gamestate.current_turn
         mating_score = CHECKMATE_SCORE if current_player_color == 'w' else -CHECKMATE_SCORE
         best_mate_move = None
 
         for move, score in all_results:
-            # Check for exact mating score
             if score == mating_score:
                 best_mate_move = move
-                break # Found the best possible outcome
+                break
 
         if best_mate_move is not None:
-            return best_mate_move, mating_score # Return immediately
-        # --- <<<< КОНЕЦ ПРИОРИТЕТА МАТА >>>> ---
+            result = (best_mate_move, mating_score, all_results) if return_all_scores else (best_mate_move, mating_score)
+            return result
 
-        # Find best move based on scores (standard minimax logic if no mate found)
-        best_move = all_results[0][0] # Default
-        if current_player_color == 'w': # Maximizing player
+        # Find best move based on scores
+        best_move = all_results[0][0]
+        if current_player_color == 'w':
             best_score = -float('inf')
             for move, score in all_results:
                 if score > best_score:
                     best_score = score
                     best_move = move
-        else: # Minimizing player
+        else:
             best_score = float('inf')
             for move, score in all_results:
                 if score < best_score:
                     best_score = score
                     best_move = move
 
-        # print(f"Minimax calculation took: {time.time() - start_time_minimax:.2f}s")
-        return best_move, best_score
+        result = (best_move, best_score, all_results) if return_all_scores else (best_move, best_score)
+        return result
 
     except Exception as e:
         print(f"Error in minimax function: {e}")
         traceback.print_exc()
-        # Fallback: return a random move if possible
         try:
              moves = gamestate.get_all_legal_moves()
-             return random.choice(moves) if moves else None, 0
+             fallback_move = random.choice(moves) if moves else None
+             result = (fallback_move, 0, [(fallback_move, 0)]) if return_all_scores else (fallback_move, 0)
+             return result
         except:
-             return None, 0 # Ultimate fallback
+             result = (None, 0, []) if return_all_scores else (None, 0)
+             return result
 
 def _minimax_worker(move, gamestate_copy, depth, alpha, beta, maximizing_player, move_cache):
     """Minimax function for a single move, executed by a worker process."""
