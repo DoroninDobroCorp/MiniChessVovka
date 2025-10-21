@@ -10,8 +10,8 @@ SCHEDULER_LOG="$PROJECT_DIR/scheduler.log"
 PID_FILE="$PROJECT_DIR/training.pid"
 
 # Временное окно (часы)
-START_HOUR=2
-END_HOUR=10
+START_HOUR=0
+END_HOUR=8
 
 # CPU ограничения (использовать первые 7 ядер: 0-6, оставить ядро 7 свободным)
 CPU_MASK="0-6"

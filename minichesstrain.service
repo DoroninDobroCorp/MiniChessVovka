@@ -1,0 +1,34 @@
+[Unit]
+Description=Mini Chess AI Self-Play Training
+After=network.target
+Wants=minichesstrain.timer
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/srv/MiniChessVovka
+ExecStart=/srv/MiniChessVovka/autorun_training.sh
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=minichesstrain
+
+# Ограничения ресурсов
+CPUQuota=80%
+MemoryLimit=4G
+MemorySwapMax=4G
+
+# Graceful shutdown
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/MiniChessVovka
+
+[Install]
+WantedBy=multi-user.target
