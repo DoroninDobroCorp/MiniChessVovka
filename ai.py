@@ -59,7 +59,7 @@ DB_PATH = "move_cache.db" # Renamed DB file
 CACHE_ENABLED = True
 # How many worker processes to use for parallel search
 # Use None to let multiprocessing decide (usually number of CPU cores)
-NUM_WORKERS = None
+NUM_WORKERS = 7  # Оставляем 1 core свободным
 
 # --- Constants ---
 CHECKMATE_SCORE = 1000000 # Large score for checkmate
@@ -71,11 +71,13 @@ def setup_db():
     try:
         conn = sqlite3.connect(DB_PATH) # No timeout needed for simple ops
         cursor = conn.cursor()
-        # Simplified schema: hash -> best_move representation
+        # Schema with depth tracking: (hash, depth) -> best_move
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS move_cache (
-                hash TEXT PRIMARY KEY,
-                best_move_repr TEXT
+                hash TEXT NOT NULL,
+                depth INTEGER NOT NULL,
+                best_move_repr TEXT NOT NULL,
+                PRIMARY KEY (hash, depth)
             )
         ''')
         conn.commit()
@@ -85,43 +87,42 @@ def setup_db():
         print(f"Error setting up database: {e}")
 
 def load_move_cache_from_db():
-    """Loads the move cache from the SQLite database."""
+    """Loads the move cache from the SQLite database with depth tracking."""
     global move_cache
     setup_db() # Ensure DB and table exist
     loaded_count = 0
-    # Note: Old cache format didn't include depth, so we skip loading it
-    # to avoid using shallow cached moves
-    move_cache = {} # Start fresh - old cache was without depth
-    print(f"Starting with empty move cache (old format incompatible).")
-    # try:
-    #     conn = sqlite3.connect(DB_PATH)
-    #     cursor = conn.cursor()
-    #     cursor.execute("SELECT hash, best_move_repr FROM move_cache")
-    #     rows = cursor.fetchall()
-    #     move_cache = {row[0]: row[1] for row in rows}
-    #     loaded_count = len(move_cache)
-    #     conn.close()
-    #     print(f"Loaded {loaded_count} entries from move cache database.")
-    # except Exception as e:
-    #     print(f"Error loading move cache from database: {e}")
-    #     move_cache = {} # Start with empty cache on error
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT hash, depth, best_move_repr FROM move_cache")
+        rows = cursor.fetchall()
+        # Load with (hash, depth) tuple keys
+        move_cache = {(row[0], row[1]): row[2] for row in rows}
+        loaded_count = len(move_cache)
+        conn.close()
+        print(f"Loaded {loaded_count} entries from move cache database.")
+    except Exception as e:
+        print(f"Error loading move cache from database: {e}")
+        move_cache = {} # Start with empty cache on error
 
 def save_move_cache_to_db(cache_to_save):
-    """Saves the current move cache to the SQLite database."""
-    # Disabled saving - new format uses (hash, depth) tuple keys which don't work well with DB
-    print(f"Move cache saving disabled (new format with depth tracking).")
-    # print(f"Attempting to save {len(cache_to_save)} cache entries...")
-    # try:
-    #     conn = sqlite3.connect(DB_PATH)
-    #     cursor = conn.cursor()
-    #     # Use INSERT OR REPLACE to update existing entries or insert new ones
-    #     entries_to_save = list(cache_to_save.items())
-    #     cursor.executemany("INSERT OR REPLACE INTO move_cache (hash, best_move_repr) VALUES (?, ?)", entries_to_save)
-    #     conn.commit()
-    #     conn.close()
-    #     print(f"Successfully saved {len(entries_to_save)} entries to move cache database.")
-    # except Exception as e:
-    #     print(f"Error saving move cache to database: {e}")
+    """Saves the current move cache to the SQLite database with depth tracking."""
+    if not cache_to_save:
+        print(f"Move cache is empty, nothing to save.")
+        return
+    
+    print(f"Attempting to save {len(cache_to_save)} cache entries...")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        # Convert (hash, depth) tuple keys to separate columns
+        entries_to_save = [(hash_val, depth, move_repr) for (hash_val, depth), move_repr in cache_to_save.items()]
+        cursor.executemany("INSERT OR REPLACE INTO move_cache (hash, depth, best_move_repr) VALUES (?, ?, ?)", entries_to_save)
+        conn.commit()
+        conn.close()
+        print(f"Successfully saved {len(entries_to_save)} entries to move cache database.")
+    except Exception as e:
+        print(f"Error saving move cache to database: {e}")
 
 
 # --- Game State Import ---
@@ -890,10 +891,10 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1):
     if best_move:
         print(f"AI ({gamestate.current_turn}) finished thinking in {end_time - start_time:.2f}s.")
         print(f"  Chosen Move: {best_move}, Score: {best_score:.2f}")
-        if return_top_n == 1:
-            cache_key = (pos_hash, depth)
-            move_cache[cache_key] = repr(best_move)
-            print(f"[CACHE STORE] Hash {pos_hash} Depth {depth}: Stored move {repr(best_move)}.")
+        # Store best move in cache regardless of return_top_n
+        cache_key = (pos_hash, depth)
+        move_cache[cache_key] = repr(best_move)
+        print(f"[CACHE STORE] Hash {pos_hash} Depth {depth}: Stored move {repr(best_move)}.")
     else:
         print(f"AI ({gamestate.current_turn}) could not find a best move after {end_time - start_time:.2f}s. Legal moves: {legal_moves}")
 

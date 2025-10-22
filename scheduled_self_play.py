@@ -270,7 +270,7 @@ def play_self_game(depth: int, exploration_rate: float, max_moves: int, game_num
     }
 
 
-def run_self_play_training(num_games: int = None, depth: int = 6, exploration_rate: float = 0.2):
+def run_self_play_training(num_games: int = None, depth: int = 5, exploration_rate: float = 0.2):
     """
     Запускает режим самообучения с полным логированием
     
@@ -411,7 +411,7 @@ def main():
     
     # Параметры самообучения
     num_games = None  # None = бесконечно, или укажите число
-    depth = 6         # Глубина поиска
+    depth = 5         # Глубина поиска (будет накапливать кэш, потом можно увеличить до 6)
     exploration_rate = 0.2  # 20% вероятность выбора 2-го лучшего хода
     
     run_self_play_training(num_games, depth, exploration_rate)
