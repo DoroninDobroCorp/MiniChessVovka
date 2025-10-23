@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MiniChessVovka Availability Test</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0f172a;
+            color: #e2e8f0;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        h1 {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 20px;
+        }
+        .test-controls {
+            background: #1e293b;
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 30px;
+        }
+        .test-controls label {
+            display: block;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+        .test-controls input {
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 2px solid #334155;
+            background: #0f172a;
+            color: #e2e8f0;
+            font-size: 16px;
+            width: 100px;
+        }
+        .test-controls button {
+            padding: 10px 20px;
+            background: #10b981;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            margin-left: 10px;
+        }
+        .test-controls button:hover {
+            background: #059669;
+        }
+        .status-display {
+            background: #1e293b;
+            border-radius: 12px;
+            padding: 20px 30px;
+            margin: 20px 0;
+            border: 2px solid #334155;
+            transition: all 0.3s ease;
+        }
+        .status-display.available {
+            border-color: #10b981;
+            background: linear-gradient(135deg, #1e293b 0%, #0a3d2d 100%);
+        }
+        .status-display.offline {
+            border-color: #64748b;
+            background: linear-gradient(135deg, #1e293b 0%, #1e1e2d 100%);
+        }
+        .status-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .status-title {
+            font-size: 24px;
+            font-weight: 600;
+        }
+        .status-badge {
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        .status-badge.available {
+            background: #10b981;
+            color: white;
+        }
+        .status-badge.offline {
+            background: #64748b;
+            color: white;
+        }
+        .status-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 10px;
+        }
+        .info-box {
+            background: rgba(15, 23, 42, 0.5);
+            padding: 12px;
+            border-radius: 8px;
+        }
+        .info-box .label {
+            font-size: 12px;
+            opacity: 0.7;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+        .info-box .value {
+            font-size: 16px;
+            font-weight: 600;
+        }
+        .test-results {
+            background: #1e293b;
+            padding: 20px;
+            border-radius: 12px;
+            margin-top: 30px;
+        }
+        .test-results h2 {
+            margin-bottom: 15px;
+            color: #60a5fa;
+        }
+        .test-result-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 12px;
+            margin: 5px 0;
+            background: #0f172a;
+            border-radius: 6px;
+            border-left: 3px solid transparent;
+        }
+        .test-result-row.available {
+            border-left-color: #10b981;
+        }
+        .test-result-row.offline {
+            border-left-color: #64748b;
+        }
+        .current-time-display {
+            background: #1e293b;
+            padding: 15px;
+            border-radius: 12px;
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 18px;
+            font-weight: 600;
+        }
+    </style>
+</head>
+<body>
+    <h1>♟️ MiniChessVovka AI Availability Test</h1>
+    
+    <div class="test-controls">
+        <h3>Test Mode: Simulate Different Times</h3>
+        <label>
+            Test UTC Hour (0-23):
+            <input type="number" id="test-hour" min="0" max="23" value="7">
+            <button onclick="testSpecificTime()">Test This Hour</button>
+            <button onclick="testAllHours()">Test All 24 Hours</button>
+        </label>
+    </div>
+    
+    <div class="current-time-display">
+        <div>Real Current Time (UTC): <span id="real-time">--:--:--</span></div>
+        <div>Test Time (UTC): <span id="test-time">--:--:--</span></div>
+    </div>
+    
+    <div id="status-display" class="status-display">
+        <div class="status-header">
+            <div class="status-title">♟️ MiniChessVovka AI</div>
+            <div id="status-badge" class="status-badge">Checking...</div>
+        </div>
+        <div class="status-details">
+            <div class="info-box">
+                <div class="label">Current Time (UTC)</div>
+                <div id="current-time" class="value">--:--:--</div>
+            </div>
+            <div class="info-box">
+                <div class="label">Working Hours</div>
+                <div class="value">02:00 - 10:00 UTC</div>
+            </div>
+            <div class="info-box">
+                <div class="label">Status</div>
+                <div id="status-text" class="value">Checking...</div>
+            </div>
+            <div class="info-box">
+                <div class="label">Availability</div>
+                <div id="availability" class="value">--</div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="test-results">
+        <h2>📊 Test Results for All 24 Hours</h2>
+        <div id="test-results-list"></div>
+    </div>
+
+    <script>
+        function checkAvailability(utcHour, utcMinutes = 0) {
+            // Check if AI is available (2 AM - 10 AM UTC, which is hours 2-9 inclusive)
+            const isAvailable = utcHour >= 2 && utcHour < 10;
+            
+            // Format time string
+            const timeString = `${String(utcHour).padStart(2, '0')}:${String(utcMinutes).padStart(2, '0')}:00`;
+            
+            // Calculate availability message
+            let availabilityMsg;
+            if (isAvailable) {
+                const hoursRemaining = 10 - utcHour - 1;
+                const minutesRemaining = 60 - utcMinutes;
+                if (hoursRemaining > 0) {
+                    availabilityMsg = `${hoursRemaining}h ${minutesRemaining}m until offline`;
+                } else {
+                    availabilityMsg = `${minutesRemaining}m until offline`;
+                }
+            } else {
+                if (utcHour < 2) {
+                    const hoursUntil = 2 - utcHour - 1;
+                    const minutesUntil = 60 - utcMinutes;
+                    availabilityMsg = `Available in ${hoursUntil}h ${minutesUntil}m (at 02:00 UTC)`;
+                } else {
+                    const hoursUntil = 24 - utcHour + 2 - 1;
+                    const minutesUntil = 60 - utcMinutes;
+                    availabilityMsg = `Available in ${hoursUntil}h ${minutesUntil}m (at 02:00 UTC)`;
+                }
+            }
+            
+            return {
+                isAvailable,
+                timeString,
+                availabilityMsg,
+                statusText: isAvailable ? '✓ Online' : '✗ Outside working hours',
+                badgeText: isAvailable ? '✓ AI AVAILABLE' : '✗ AI OFFLINE'
+            };
+        }
+        
+        function updateDisplay(result) {
+            const statusDiv = document.getElementById('status-display');
+            const badge = document.getElementById('status-badge');
+            const statusText = document.getElementById('status-text');
+            const availabilityText = document.getElementById('availability');
+            const currentTime = document.getElementById('current-time');
+            
+            statusDiv.classList.remove('available', 'offline');
+            badge.classList.remove('available', 'offline');
+            
+            if (result.isAvailable) {
+                statusDiv.classList.add('available');
+                badge.classList.add('available');
+            } else {
+                statusDiv.classList.add('offline');
+                badge.classList.add('offline');
+            }
+            
+            badge.textContent = result.badgeText;
+            statusText.textContent = result.statusText;
+            availabilityText.textContent = result.availabilityMsg;
+            currentTime.textContent = result.timeString;
+        }
+        
+        function testSpecificTime() {
+            const hour = parseInt(document.getElementById('test-hour').value);
+            const result = checkAvailability(hour, 0);
+            updateDisplay(result);
+            document.getElementById('test-time').textContent = result.timeString;
+        }
+        
+        function testAllHours() {
+            const resultsList = document.getElementById('test-results-list');
+            let html = '';
+            
+            for (let hour = 0; hour < 24; hour++) {
+                const result = checkAvailability(hour, 0);
+                const statusClass = result.isAvailable ? 'available' : 'offline';
+                html += `
+                    <div class="test-result-row ${statusClass}">
+                        <span>Hour ${String(hour).padStart(2, '0')}:00 UTC</span>
+                        <span>${result.badgeText}</span>
+                        <span>${result.availabilityMsg}</span>
+                    </div>
+                `;
+            }
+            
+            resultsList.innerHTML = html;
+        }
+        
+        function updateRealTime() {
+            const now = new Date();
+            const utcHour = now.getUTCHours();
+            const utcMinutes = now.getUTCMinutes();
+            const utcSeconds = now.getUTCSeconds();
+            const timeString = `${String(utcHour).padStart(2, '0')}:${String(utcMinutes).padStart(2, '0')}:${String(utcSeconds).padStart(2, '0')}`;
+            document.getElementById('real-time').textContent = timeString;
+        }
+        
+        // Initial load
+        updateRealTime();
+        testSpecificTime();
+        testAllHours();
+        
+        // Update real time every second
+        setInterval(updateRealTime, 1000);
+    </script>
+</body>
+</html>

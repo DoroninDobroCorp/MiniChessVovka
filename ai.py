@@ -1,6 +1,7 @@
 # --- Imports and Constants ---
 import sqlite3
 import time
+from datetime import datetime
 import copy
 import random
 import math
@@ -61,16 +62,36 @@ CACHE_ENABLED = True
 # Use None to let multiprocessing decide (usually number of CPU cores)
 NUM_WORKERS = 7  # Оставляем 1 core свободным
 
+# --- Training Time Configuration ---
+def is_training_time():
+    """Check if current time is between 2 AM and 10 AM"""
+    current_hour = datetime.now().hour
+    return 2 <= current_hour < 10
+
 # --- Constants ---
 CHECKMATE_SCORE = 1000000 # Large score for checkmate
 STALEMATE_SCORE = 0       # Score for stalemate
 MAX_QUIESCENCE_DEPTH = 4  # Limit quiescence search depth (increased for better tactics)
 
 def setup_db():
-    """Creates the move_cache table if it doesn't exist."""
+    """Creates the move_cache table if it doesn't exist, migrates old schema if needed."""
     try:
         conn = sqlite3.connect(DB_PATH) # No timeout needed for simple ops
         cursor = conn.cursor()
+        
+        # Check if table exists and has correct schema
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='move_cache'")
+        table_exists = cursor.fetchone() is not None
+        
+        if table_exists:
+            # Check if depth column exists
+            cursor.execute("PRAGMA table_info(move_cache)")
+            columns = [col[1] for col in cursor.fetchall()]
+            if 'depth' not in columns:
+                print(f"Old schema detected in {DB_PATH}, migrating to new schema with depth column...")
+                cursor.execute("DROP TABLE move_cache")
+                conn.commit()
+        
         # Schema with depth tracking: (hash, depth) -> best_move
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS move_cache (
@@ -771,6 +792,12 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1):
         If return_top_n == 1: best_move
         If return_top_n > 1: list of (move, score) tuples, sorted best to worst
     """
+    # Check if we're in allowed training hours (2 AM - 10 AM)
+    if not is_training_time():
+        current_time = datetime.now().strftime('%H:%M')
+        print(f"AI is outside training hours (2 AM - 10 AM). Current time: {current_time}")
+        return None if return_top_n == 1 else []
+    
     print(f"AI ({gamestate.current_turn}) thinking with iterative deepening up to depth {depth}...")
     start_time = time.time()
     is_maximizing = (gamestate.current_turn == 'w')

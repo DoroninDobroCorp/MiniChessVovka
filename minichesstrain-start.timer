@@ -1,0 +1,16 @@
+[Unit]
+Description=Mini Chess AI Training Start Timer (10 PM America/Los_Angeles daily)
+Documentation=file:///srv/MiniChessVovka/README_AI.md
+
+[Timer]
+# Start at 10 PM (22:00) in America/Los_Angeles timezone
+OnCalendar=*-*-* 22:00:00 America/Los_Angeles
+
+# Run immediately on boot if we're past the start time
+Persistent=true
+
+# Accuracy: trigger within 1 minute of scheduled time
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

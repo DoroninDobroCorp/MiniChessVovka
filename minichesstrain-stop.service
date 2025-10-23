@@ -1,0 +1,23 @@
+[Unit]
+Description=Mini Chess AI Training Stop (Graceful Shutdown)
+Documentation=file:///srv/MiniChessVovka/README_AI.md
+Wants=minichesstrain-stop.timer
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/srv/MiniChessVovka
+
+# Stop the training service gracefully using SIGTERM
+ExecStart=/usr/bin/systemctl stop minichesstrain.service
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=minichesstrain-stop
+
+# Timeout for stopping (gives 60 seconds for graceful shutdown)
+TimeoutStartSec=90
+
+[Install]
+WantedBy=multi-user.target

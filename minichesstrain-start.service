@@ -1,0 +1,23 @@
+[Unit]
+Description=Mini Chess AI Training Start
+Documentation=file:///srv/MiniChessVovka/README_AI.md
+Wants=minichesstrain-start.timer
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/srv/MiniChessVovka
+
+# Start the training service
+ExecStart=/usr/bin/systemctl start minichesstrain.service
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=minichesstrain-start
+
+# Timeout for starting
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target
