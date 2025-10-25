@@ -792,11 +792,7 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1):
         If return_top_n == 1: best_move
         If return_top_n > 1: list of (move, score) tuples, sorted best to worst
     """
-    # Check if we're in allowed training hours (2 AM - 10 AM)
-    if not is_training_time():
-        current_time = datetime.now().strftime('%H:%M')
-        print(f"AI is outside training hours (2 AM - 10 AM). Current time: {current_time}")
-        return None if return_top_n == 1 else []
+    # Training time check removed - scheduled_self_play.py handles scheduling
     
     print(f"AI ({gamestate.current_turn}) thinking with iterative deepening up to depth {depth}...")
     start_time = time.time()

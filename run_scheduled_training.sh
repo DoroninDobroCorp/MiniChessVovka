@@ -21,13 +21,24 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$SCHEDULER_LOG"
 }
 
-# Функция проверки времени
+# Функция проверки времени (поддерживает окна через полночь)
 is_training_time() {
     current_hour=$(date +%H | sed 's/^0//')
-    if [ $current_hour -ge $START_HOUR ] && [ $current_hour -lt $END_HOUR ]; then
-        return 0
+    
+    # Если окно через полночь (например 20:00-08:00)
+    if [ $START_HOUR -gt $END_HOUR ]; then
+        if [ $current_hour -ge $START_HOUR ] || [ $current_hour -lt $END_HOUR ]; then
+            return 0
+        else
+            return 1
+        fi
     else
-        return 1
+        # Обычное окно в пределах одного дня
+        if [ $current_hour -ge $START_HOUR ] && [ $current_hour -lt $END_HOUR ]; then
+            return 0
+        else
+            return 1
+        fi
     fi
 }
 
@@ -41,14 +52,27 @@ start_training() {
     # Проверяем наличие taskset
     if ! command -v taskset &> /dev/null; then
         log "ВНИМАНИЕ: taskset не найден, запуск без ограничения CPU"
-        nohup $PYTHON_CMD "$SCRIPT_NAME" >> "$LOG_FILE" 2>&1 &
+        $PYTHON_CMD "$SCRIPT_NAME" >> "$LOG_FILE" 2>&1 &
+        REAL_PID=$!
     else
-        nohup taskset -c $CPU_MASK $PYTHON_CMD "$SCRIPT_NAME" >> "$LOG_FILE" 2>&1 &
+        taskset -c $CPU_MASK $PYTHON_CMD "$SCRIPT_NAME" >> "$LOG_FILE" 2>&1 &
+        REAL_PID=$!
     fi
     
-    echo $! > "$PID_FILE"
-    log "Обучение запущено с PID: $(cat $PID_FILE)"
+    echo $REAL_PID > "$PID_FILE"
+    log "Обучение запущено с PID: $REAL_PID"
     log "Будет работать до $END_HOUR:00"
+    
+    # Даём процессу 3 секунды на старт
+    sleep 3
+    
+    # Проверяем что процесс действительно запустился
+    if ps -p $REAL_PID > /dev/null 2>&1; then
+        log "Процесс успешно запущен и работает"
+    else
+        log "ОШИБКА: Процесс не запустился!"
+        rm -f "$PID_FILE"
+    fi
 }
 
 # Функция остановки обучения
@@ -110,17 +134,31 @@ stop_training() {
 
 # Функция проверки запущенного процесса
 is_training_running() {
+    # Сначала проверяем PID файл
     if [ -f "$PID_FILE" ]; then
         PID=$(cat "$PID_FILE")
         if ps -p $PID > /dev/null 2>&1; then
-            return 0
+            # Дополнительно проверяем что это действительно наш скрипт
+            if ps -p $PID -o cmd= | grep -q "scheduled_self_play.py"; then
+                return 0
+            else
+                log "ВНИМАНИЕ: PID $PID не является процессом scheduled_self_play.py"
+                rm "$PID_FILE"
+            fi
         else
             rm "$PID_FILE"
-            return 1
         fi
-    else
-        return 1
     fi
+    
+    # Если PID файла нет или процесс не найден, ищем по имени
+    if pgrep -f "scheduled_self_play.py" > /dev/null 2>&1; then
+        FOUND_PID=$(pgrep -f "scheduled_self_play.py" | head -1)
+        log "Найден работающий процесс обучения с PID: $FOUND_PID (без PID файла)"
+        echo $FOUND_PID > "$PID_FILE"
+        return 0
+    fi
+    
+    return 1
 }
 
 # Главная логика
