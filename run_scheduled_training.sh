@@ -49,29 +49,44 @@ start_training() {
     
     cd "$PROJECT_DIR" || exit 1
     
-    # Проверяем наличие taskset
+    # Запускаем обучение (taskset не меняет, запускаем напрямую)
     if ! command -v taskset &> /dev/null; then
         log "ВНИМАНИЕ: taskset не найден, запуск без ограничения CPU"
         $PYTHON_CMD "$SCRIPT_NAME" >> "$LOG_FILE" 2>&1 &
-        REAL_PID=$!
     else
         taskset -c $CPU_MASK $PYTHON_CMD "$SCRIPT_NAME" >> "$LOG_FILE" 2>&1 &
-        REAL_PID=$!
+    fi
+    
+    # Даём процессу 1 секунду на старт
+    sleep 1
+    
+    # Ищем реальный Python процесс (главный, не worker)
+    # Ищем процесс с PPID=1 (демон) или минимальным PPID
+    REAL_PID=$(ps -eo pid,ppid,cmd | grep "python.*$SCRIPT_NAME" | grep -v grep | grep -v "/bin/sh" | awk '{if ($2 == 1 || !pid || $2 < ppid) {pid=$1; ppid=$2}} END {print pid}')
+    
+    if [ -z "$REAL_PID" ]; then
+        log "ОШИБКА: Не удалось найти процесс Python!"
+        # Пробуем простой поиск
+        REAL_PID=$(pgrep -f "python3.*$SCRIPT_NAME" | head -1)
+        if [ -z "$REAL_PID" ]; then
+            log "ОШИБКА: Процесс Python не найден даже простым поиском!"
+            return 1
+        fi
+        log "Найден через простой поиск: $REAL_PID"
     fi
     
     echo $REAL_PID > "$PID_FILE"
     log "Обучение запущено с PID: $REAL_PID"
     log "Будет работать до $END_HOUR:00"
     
-    # Даём процессу 3 секунды на старт
-    sleep 3
-    
-    # Проверяем что процесс действительно запустился
+    # Проверяем что процесс работает
+    sleep 2
     if ps -p $REAL_PID > /dev/null 2>&1; then
-        log "Процесс успешно запущен и работает"
+        log "Процесс успешно работает"
     else
-        log "ОШИБКА: Процесс не запустился!"
+        log "ВНИМАНИЕ: Процесс $REAL_PID не найден после проверки"
         rm -f "$PID_FILE"
+        return 1
     fi
 }
 
@@ -151,11 +166,14 @@ is_training_running() {
     fi
     
     # Если PID файла нет или процесс не найден, ищем по имени
-    if pgrep -f "scheduled_self_play.py" > /dev/null 2>&1; then
-        FOUND_PID=$(pgrep -f "scheduled_self_play.py" | head -1)
-        log "Найден работающий процесс обучения с PID: $FOUND_PID (без PID файла)"
-        echo $FOUND_PID > "$PID_FILE"
-        return 0
+    if pgrep -f "python3.*scheduled_self_play.py" > /dev/null 2>&1; then
+        # Ищем главный процесс (с минимальным PPID или PPID=1)
+        FOUND_PID=$(ps -eo pid,ppid,cmd | grep "python.*scheduled_self_play.py" | grep -v grep | awk '{if ($2 == 1 || !pid || $2 < ppid) {pid=$1; ppid=$2}} END {print pid}')
+        if [ -n "$FOUND_PID" ]; then
+            log "Найден работающий процесс обучения с PID: $FOUND_PID (без PID файла)"
+            echo $FOUND_PID > "$PID_FILE"
+            return 0
+        fi
     fi
     
     return 1
