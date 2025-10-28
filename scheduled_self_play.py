@@ -160,6 +160,12 @@ def choose_move_with_exploration(gamestate: GameState, depth: int, exploration_r
         return best_move
 
 
+def is_training_time():
+    """Проверяет находимся ли в окне обучения 02:00-10:00 UTC"""
+    current_hour = datetime.now().hour
+    return 2 <= current_hour < 10
+
+
 def play_self_game(depth: int, exploration_rate: float, max_moves: int, game_num: int):
     """
     Проводит одну игру AI против себя с подробным логированием
@@ -175,6 +181,18 @@ def play_self_game(depth: int, exploration_rate: float, max_moves: int, game_num
     """
     global shutdown_requested
     
+    # Проверяем временное окно перед началом игры
+    if not is_training_time():
+        log_message(f"\nВремя вне окна обучения (02:00-10:00 UTC), завершаем работу...")
+        shutdown_requested = True
+        return {
+            'result': 'interrupted',
+            'winner': None,
+            'moves': 0,
+            'duration': 0,
+            'avg_move_time': 0
+        }
+    
     gamestate = GameState()
     gamestate.setup_initial_board()
     
@@ -187,6 +205,17 @@ def play_self_game(depth: int, exploration_rate: float, max_moves: int, game_num
     log_message("="*60 + "\n")
     
     while not shutdown_requested:
+        # Проверяем временное окно перед каждым ходом
+        if not is_training_time():
+            log_message(f"\nВремя вне окна обучения (02:00-10:00 UTC), останавливаем игру...")
+            return {
+                'result': 'interrupted',
+                'winner': None,
+                'moves': move_count - 1,
+                'duration': time.time() - game_start,
+                'avg_move_time': sum(move_times) / len(move_times) if move_times else 0
+            }
+        
         move_count += 1
         current_player = "Белые" if gamestate.current_turn == 'w' else "Черные"
         
