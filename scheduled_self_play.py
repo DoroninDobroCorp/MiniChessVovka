@@ -10,6 +10,7 @@ import sys
 import time
 import random
 import os
+import threading
 from datetime import datetime
 from gamestate import GameState
 import ai
@@ -18,10 +19,12 @@ from utils import format_move_for_print
 
 # Глобальный флаг для graceful shutdown
 shutdown_requested = False
+health_updater_running = False
 
 # Файл логов
 LOG_FILE = "training_log.txt"
 PROGRESS_FILE = "training_progress.txt"
+HEALTH_FILE = "training.health"
 
 
 def signal_handler(signum, frame):
@@ -37,6 +40,39 @@ def setup_signal_handlers():
     """Устанавливает обработчики сигналов"""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
+
+def update_health():
+    """Обновляет health файл текущим timestamp для мониторинга"""
+    try:
+        with open(HEALTH_FILE, 'w') as f:
+            f.write(str(int(time.time())))
+    except Exception as e:
+        # Не прерываем работу, если не удалось записать health файл
+        pass
+
+
+def health_updater_thread():
+    """Фоновый поток для регулярного обновления health файла"""
+    global health_updater_running
+    health_updater_running = True
+    
+    while not shutdown_requested and health_updater_running:
+        update_health()
+        # Обновляем каждые 30 секунд
+        for _ in range(30):
+            if shutdown_requested:
+                break
+            time.sleep(1)
+    
+    health_updater_running = False
+
+
+def start_health_updater():
+    """Запускает фоновый поток обновления health"""
+    thread = threading.Thread(target=health_updater_thread, daemon=True)
+    thread.start()
+    return thread
 
 
 def log_message(message, console=True, file=True):
@@ -442,6 +478,10 @@ def main():
     num_games = None  # None = бесконечно, или укажите число
     depth = 5         # Глубина поиска (будет накапливать кэш, потом можно увеличить до 6)
     exploration_rate = 0.2  # 20% вероятность выбора 2-го лучшего хода
+    
+    # Запускаем фоновый поток для обновления health каждые 30 сек
+    health_thread = start_health_updater()
+    log_message("Запущен фоновый поток обновления health файла (каждые 30с)", console=False)
     
     run_self_play_training(num_games, depth, exploration_rate)
 
