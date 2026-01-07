@@ -1,10 +1,17 @@
 #!/bin/bash
 # Информационная панель обучения (live dashboard)
 
-PROJECT_DIR="/srv/MiniChessVovka"
-PROGRESS_FILE="$PROJECT_DIR/training_progress.txt"
-LOG_FILE="$PROJECT_DIR/training_log.txt"
-PID_FILE="$PROJECT_DIR/training.pid"
+PROJHEALTH_FILE="/srv/MiniChessVovka/training.health"
+PID_FILE="/srv/MiniChessVovka/training.pid"
+LOG_FILE="/srv/MiniChessVovka/training_log.txt"
+PROGRESS_FILE="/srv/MiniChessVovka/training_progress.txt" # Kept as it's used later
+SCRIPT_PATH="/srv/MiniChessVovka/src/scheduled_self_play.py"
+
+# ANSI color codes
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
 
 # Function to check if current time is in AI training window (2 AM - 10 AM UTC)
 is_training_time() {
@@ -36,67 +43,60 @@ while true; do
     echo ""
     
     # Check process state
-    process_running=false
-    process_active=false
+    pid=""
+    health_status="unknown" # ok, inactive, no_file
     activity_seconds=999999
     
     if [ -f "$PID_FILE" ]; then
-        pid=$(cat "$PID_FILE")
-        if ps -p $pid > /dev/null 2>&1; then
-            process_running=true
+        current_pid=$(cat "$PID_FILE")
+        if ps -p $current_pid > /dev/null 2>&1; then
+            pid=$current_pid
             
             # Check activity via health file
-            if [ -f "$PROJECT_DIR/training.health" ]; then
-                last_update=$(cat "$PROJECT_DIR/training.health")
+            if [ -f "$PROJHEALTH_FILE" ]; then
+                last_update=$(cat "$PROJHEALTH_FILE")
                 current_time=$(date +%s)
                 activity_seconds=$((current_time - last_update))
                 
                 if [ $activity_seconds -lt 600 ]; then
-                    process_active=true
+                    health_status="ok"
+                else
+                    health_status="inactive"
                 fi
+            else
+                health_status="no_file"
             fi
-        fi
-    else
-        # Check for any running scheduled_self_play.py processes
-        if pgrep -f "scheduled_self_play.py" > /dev/null 2>&1; then
-            process_running=true
         fi
     fi
     
     # Determine overall health status
-    in_training_time=false
-    if is_training_time; then
-        in_training_time=true
-    fi
+    # Логика статуса:
+    # 02:00 - 10:00 UTC: Должен работать (PID есть + Health свежий) -> OK, иначе ERROR
+    # 10:00 - 02:00 UTC: Должен отдыхать (PID нет) -> OK, иначе WARNING (или ERROR если работает)
     
-    status_icon=""
+    status_color=""
     status_text=""
     
-    if [ "$in_training_time" = true ]; then
-        # DURING working hours (2-10 AM UTC)
-        if [ "$process_running" = true ] && [ "$process_active" = true ]; then
-            # GREEN: Process running and active during working hours
-            status_icon="✓"
-            status_text="HEALTHY - Process active during working hours"
+    if is_training_time; then
+        # НОЧЬ (Рабочее время)
+        if [ -n "$pid" ] && [ "$health_status" == "ok" ]; then
+             status_color=$GREEN
+             status_text="АКТИВЕН (ОБУЧЕНИЕ)"
+        elif [ -n "$pid" ]; then
+             status_color=$YELLOW
+             status_text="ЗАВИС?"
         else
-            # RED: Process not running or inactive during working hours
-            status_icon="✗"
-            if [ "$process_running" = false ]; then
-                status_text="PROBLEM - Process should be running during working hours"
-            else
-                status_text="PROBLEM - Process inactive for ${activity_seconds}s (>10 min)"
-            fi
+             status_color=$RED
+             status_text="ОСТАНОВЛЕН (ОШИБКА)"
         fi
     else
-        # OUTSIDE working hours (not 2-10 AM UTC)
-        if [ "$process_running" = false ]; then
-            # GREEN: Process correctly stopped outside working hours
-            status_icon="✓"
-            status_text="HEALTHY - Process correctly stopped outside working hours"
+        # ДЕНЬ (Время отдыха)
+        if [ -z "$pid" ]; then
+             status_color=$GREEN
+             status_text="ОЖИДАНИЕ (ОТДЫХ)"
         else
-            # RED: Process running when it shouldn't be
-            status_icon="✗"
-            status_text="PROBLEM - Process running outside working hours"
+             status_color=$YELLOW
+             status_text="РАБОТАЕТ ВНЕ ГРАФИКА"
         fi
     fi
     
@@ -105,7 +105,7 @@ while true; do
     echo "║                    OVERALL HEALTH STATUS                       ║"
     echo "╚════════════════════════════════════════════════════════════════╝"
     echo ""
-    echo "  ${status_icon} ${status_text}"
+    echo -e "  ${status_color}${status_text}${NC}"
     echo ""
     
     # Time window information

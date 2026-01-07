@@ -11,7 +11,7 @@ import time
 import random
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from gamestate import GameState
 import ai
 from utils import format_move_for_print
@@ -25,6 +25,7 @@ health_updater_running = False
 LOG_FILE = "training_log.txt"
 PROGRESS_FILE = "training_progress.txt"
 HEALTH_FILE = "training.health"
+PID_FILE = "training.pid"
 
 
 def signal_handler(signum, frame):
@@ -34,12 +35,23 @@ def signal_handler(signum, frame):
     log_message("Получен сигнал прерывания. Завершаем работу...")
     log_message("="*60)
     shutdown_requested = True
+    
+    if os.path.exists(PID_FILE):
+        try:
+            os.remove(PID_FILE)
+        except Exception:
+            pass
 
+def write_pid():
+    """Writes current PID to file"""
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
 
 def setup_signal_handlers():
     """Устанавливает обработчики сигналов"""
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    write_pid()
 
 
 def update_health():
@@ -196,10 +208,66 @@ def choose_move_with_exploration(gamestate: GameState, depth: int, exploration_r
         return best_move
 
 
+def get_current_utc_hour():
+    """Возвращает текущий час в UTC"""
+    return datetime.now(timezone.utc).hour
+
 def is_training_time():
     """Проверяет находимся ли в окне обучения 02:00-10:00 UTC"""
-    current_hour = datetime.now().hour
+    current_hour = get_current_utc_hour()
     return 2 <= current_hour < 10
+
+def is_before_training_window():
+    """Проверяет находимся ли ДО окна обучения (00:00-02:00 UTC)"""
+    current_hour = get_current_utc_hour()
+    return current_hour < 2
+
+def should_exit():
+    """Проверяет нужно ли завершать работу (достигли 10:00 UTC)"""
+    current_hour = get_current_utc_hour()
+    # Выходим только если час >= 10 (после окна обучения)
+    return current_hour >= 10
+
+def wait_for_training_window():
+    """
+    Ожидает начала окна обучения (02:00 UTC).
+    Возвращает True если дождались, False если получен сигнал завершения.
+    """
+    global shutdown_requested
+    
+    if is_training_time():
+        return True  # Уже в окне
+    
+    if should_exit():
+        # После 10:00 UTC - выходим, таймер перезапустит завтра в 00:00
+        log_message(f"Текущее время после окна обучения (час UTC: {get_current_utc_hour()}). Завершение, таймер перезапустит завтра.")
+        return False
+    
+    # Мы в периоде 00:00-02:00 UTC - ждём начала окна
+    log_message(f"\nОжидание начала окна обучения (02:00 UTC)...")
+    log_message(f"Текущий час UTC: {get_current_utc_hour()}")
+    
+    while is_before_training_window() and not shutdown_requested:
+        # Вычисляем сколько осталось ждать
+        now = datetime.now(timezone.utc)
+        minutes_to_wait = (2 - now.hour) * 60 - now.minute
+        
+        if minutes_to_wait > 0:
+            log_message(f"До начала обучения: ~{minutes_to_wait} минут. Ждём...", console=True, file=False)
+        
+        # Спим по 60 секунд с проверкой shutdown
+        for _ in range(60):
+            if shutdown_requested:
+                log_message("Получен сигнал завершения во время ожидания.")
+                return False
+            time.sleep(1)
+            update_health()  # Обновляем health чтобы показать что процесс жив
+    
+    if shutdown_requested:
+        return False
+    
+    log_message(f"\nОкно обучения началось! (час UTC: {get_current_utc_hour()})")
+    return True
 
 
 def play_self_game(depth: int, exploration_rate: float, max_moves: int, game_num: int):
@@ -218,16 +286,11 @@ def play_self_game(depth: int, exploration_rate: float, max_moves: int, game_num
     global shutdown_requested
     
     # Проверяем временное окно перед началом игры
-    if not is_training_time():
-        log_message(f"\nВремя вне окна обучения (02:00-10:00 UTC), завершаем работу...")
-        shutdown_requested = True
-        return {
-            'result': 'interrupted',
-            'winner': None,
-            'moves': 0,
-            'duration': 0,
-            'avg_move_time': 0
-        }
+    if should_exit():
+        log_message(f"\nДостигнут конец окна обучения (10:00 UTC). Завершение работы.")
+        ai.save_move_cache_to_db(ai.move_cache)
+        sys.exit(0)
+
     
     gamestate = GameState()
     gamestate.setup_initial_board()
@@ -242,15 +305,11 @@ def play_self_game(depth: int, exploration_rate: float, max_moves: int, game_num
     
     while not shutdown_requested:
         # Проверяем временное окно перед каждым ходом
-        if not is_training_time():
-            log_message(f"\nВремя вне окна обучения (02:00-10:00 UTC), останавливаем игру...")
-            return {
-                'result': 'interrupted',
-                'winner': None,
-                'moves': move_count - 1,
-                'duration': time.time() - game_start,
-                'avg_move_time': sum(move_times) / len(move_times) if move_times else 0
-            }
+        if should_exit():
+            log_message(f"\nДостигнут конец окна обучения (10:00 UTC). Завершение работы.")
+            ai.save_move_cache_to_db(ai.move_cache)
+            sys.exit(0)
+
         
         move_count += 1
         current_player = "Белые" if gamestate.current_turn == 'w' else "Черные"
@@ -474,14 +533,24 @@ def main():
     """Точка входа"""
     setup_signal_handlers()
     
-    # Параметры самообучения
-    num_games = None  # None = бесконечно, или укажите число
-    depth = 5         # Глубина поиска (будет накапливать кэш, потом можно увеличить до 6)
-    exploration_rate = 0.2  # 20% вероятность выбора 2-го лучшего хода
-    
     # Запускаем фоновый поток для обновления health каждые 30 сек
     health_thread = start_health_updater()
-    log_message("Запущен фоновый поток обновления health файла (каждые 30с)", console=False)
+    
+    log_message("\n" + "="*60)
+    log_message("Mini Chess AI Self-Play Training")
+    log_message(f"Запуск: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC")
+    log_message(f"Окно обучения: 02:00-10:00 UTC (8 часов)")
+    log_message("="*60)
+    
+    # Ждём начала окна обучения если нужно
+    if not wait_for_training_window():
+        log_message("Обучение не начато - завершение.")
+        return
+    
+    # Параметры самообучения
+    num_games = None  # None = бесконечно, или укажите число
+    depth = 5         # Глубина поиска
+    exploration_rate = 0.2  # 20% вероятность выбора 2-го лучшего хода
     
     run_self_play_training(num_games, depth, exploration_rate)
 

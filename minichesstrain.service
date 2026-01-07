@@ -7,16 +7,17 @@ Wants=minichesstrain.timer
 Type=simple
 User=ubuntu
 WorkingDirectory=/srv/MiniChessVovka
-ExecStart=/srv/MiniChessVovka/autorun_training.sh
+ExecStart=/usr/bin/python3 /srv/MiniChessVovka/src/scheduled_self_play.py
 Restart=on-failure
+RestartPreventExitStatus=0
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=minichesstrain
 
-# Ограничения ресурсов
+# Resource Limits
 CPUQuota=80%
-MemoryLimit=4G
+MemoryMax=4G
 MemorySwapMax=4G
 
 # Graceful shutdown

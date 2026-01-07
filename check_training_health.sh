@@ -2,6 +2,7 @@
 # Скрипт проверки здоровья обучения
 
 PROJECT_DIR="/srv/MiniChessVovka"
+SCRIPT_PATH="$PROJECT_DIR/src/scheduled_self_play.py"
 PID_FILE="$PROJECT_DIR/training.pid"
 HEALTH_FILE="$PROJECT_DIR/training.health"
 LOG_FILE="$PROJECT_DIR/training_log.txt"
@@ -19,17 +20,24 @@ is_training_time() {
     [ "$current_hour" -ge 2 ] && [ "$current_hour" -lt 10 ]
 }
 
+# Function to check if we're in pre-training window (00:00-02:00 UTC, waiting for training)
+is_waiting_time() {
+    current_hour=$(date -u +%H | sed 's/^0*//')
+    [ -z "$current_hour" ] && current_hour=0
+    [ "$current_hour" -lt 2 ]
+}
+
 # Function to get next availability window
 get_next_availability() {
     current_hour=$(date -u +%H | sed 's/^0*//')
     [ -z "$current_hour" ] && current_hour=0
     
     if [ "$current_hour" -lt 2 ]; then
-        echo "Available in $((2 - current_hour)) hours (at 02:00 UTC)"
+        echo "Ожидание начала обучения в $((2 - current_hour)) часов (в 02:00 UTC)"
     elif [ "$current_hour" -ge 10 ]; then
-        echo "Available in $((24 - current_hour + 2)) hours (at 02:00 UTC tomorrow)"
+        echo "Следующий запуск через $((24 - current_hour)) часов (в 00:00 UTC завтра)"
     else
-        echo "Available now until 10:00 UTC (in $((10 - current_hour)) hours)"
+        echo "Обучение активно до 10:00 UTC (осталось $((10 - current_hour)) часов)"
     fi
 }
 
@@ -68,8 +76,11 @@ fi
 
 # Determine overall health status
 in_training_time=false
+in_waiting_time=false
 if is_training_time; then
     in_training_time=true
+elif is_waiting_time; then
+    in_waiting_time=true
 fi
 
 status_color=""
@@ -77,34 +88,41 @@ status_icon=""
 status_text=""
 
 if [ "$in_training_time" = true ]; then
-    # DURING working hours (2-10 AM UTC)
+    # DURING training hours (2-10 AM UTC)
     if [ "$process_running" = true ] && [ "$process_active" = true ]; then
-        # GREEN: Process running and active during working hours
         status_color="$GREEN"
         status_icon="✓"
-        status_text="HEALTHY - Process active during working hours"
+        status_text="HEALTHY - Обучение активно (02:00-10:00 UTC)"
     else
-        # RED: Process not running or inactive during working hours
         status_color="$RED"
         status_icon="✗"
         if [ "$process_running" = false ]; then
-            status_text="PROBLEM - Process should be running during working hours"
+            status_text="PROBLEM - Процесс должен работать в это время"
         else
-            status_text="PROBLEM - Process inactive for ${activity_seconds}s (>10 min threshold)"
+            status_text="PROBLEM - Процесс неактивен ${activity_seconds}с (порог: 10 мин)"
         fi
     fi
-else
-    # OUTSIDE working hours (not 2-10 AM UTC)
-    if [ "$process_running" = false ]; then
-        # GREEN: Process correctly stopped outside working hours
-        status_color="$GREEN"
-        status_icon="✓"
-        status_text="HEALTHY - Process correctly stopped outside working hours"
+elif [ "$in_waiting_time" = true ]; then
+    # WAITING period (00:00-02:00 UTC)
+    if [ "$process_running" = true ]; then
+        status_color="$BLUE"
+        status_icon="⏳"
+        status_text="WAITING - Процесс ожидает начала обучения (02:00 UTC)"
     else
-        # RED: Process running when it shouldn't be
         status_color="$RED"
         status_icon="✗"
-        status_text="PROBLEM - Process running outside working hours (2-10 AM UTC)"
+        status_text="PROBLEM - Процесс должен быть запущен (ожидание 02:00 UTC)"
+    fi
+else
+    # OUTSIDE working hours (10:00-24:00 UTC)
+    if [ "$process_running" = false ]; then
+        status_color="$GREEN"
+        status_icon="✓"
+        status_text="HEALTHY - Процесс корректно остановлен (вне рабочих часов)"
+    else
+        status_color="$YELLOW"
+        status_icon="!"
+        status_text="NOTE - Процесс всё ещё работает (завершится вскоре)"
     fi
 fi
 
@@ -118,16 +136,19 @@ echo ""
 
 # Time window information
 current_time_utc=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-echo "🕐 TIME WINDOW:"
+echo "TIME WINDOW:"
 echo "  Current Time: $current_time_utc"
-echo "  Working Hours: 02:00-10:00 UTC (8-hour window)"
+echo "  Timer Start:  00:00 UTC (запуск systemd таймера)"
+echo "  Training:     02:00-10:00 UTC (8-часовое окно обучения)"
+echo ""
 if [ "$in_training_time" = true ]; then
-    echo -e "  ${BLUE}Within working hours - AI should be active${NC}"
-    echo -e "  ${BLUE}$(get_next_availability)${NC}"
+    echo -e "  ${GREEN}Окно обучения активно${NC}"
+elif [ "$in_waiting_time" = true ]; then
+    echo -e "  ${BLUE}Период ожидания (процесс ждёт 02:00 UTC)${NC}"
 else
-    echo -e "  ${YELLOW}Outside working hours - AI should be stopped${NC}"
-    echo -e "  ${YELLOW}$(get_next_availability)${NC}"
+    echo -e "  ${YELLOW}Вне рабочих часов (таймер запустится в 00:00 UTC)${NC}"
 fi
+echo -e "  $(get_next_availability)"
 echo ""
 echo "================================"
 echo ""

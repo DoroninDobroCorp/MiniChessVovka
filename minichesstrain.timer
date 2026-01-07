@@ -1,18 +1,16 @@
 [Unit]
-Description=Mini Chess AI Training Timer (0-8 UTC daily)
-Requires=minichesstrain.service
+Description=Mini Chess AI Training Timer (00:00 UTC daily start)
+# НЕ используем Requires - пусть timer живет независимо от service
 
 [Timer]
-# Проверяем каждые 30 минут
-OnBootSec=5min
-OnUnitActiveSec=30min
+# Запускаем каждый день в 00:00 UTC
+# Скрипт сам ждёт 02:00 UTC чтобы начать обучение и завершится в 10:00 UTC
+OnCalendar=*-*-* 00:00:00
 
-# Одноразовый запуск в 00:00 UTC (перезапускается через timer)
-# Если хочешь в 0:00 ночи ежедневно:
-# OnCalendar=daily
-# OnCalendar=*-*-* 00:00:00 UTC
+# Если пропустили (сервер был выключен), не запускать при следующей загрузке
+Persistent=false
 
-Persistent=true
+# Точность срабатывания
 AccuracySec=1min
 
 [Install]

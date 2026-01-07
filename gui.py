@@ -105,7 +105,7 @@ def invert_surface_colors(surface):
         inverted_surface.unlock()
     return inverted_surface
 
-def load_images(image_dir=".", target_piece_size=int(SQUARE_SIZE * 0.9)):
+def load_images(image_dir="assets/sprites", target_piece_size=int(SQUARE_SIZE * 0.9)):
     """Loads piece images from a directory, resizes, creates white versions by inverting.
        Uses specific filenames provided by user.
     """

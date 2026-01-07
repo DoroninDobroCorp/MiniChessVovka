@@ -5,18 +5,16 @@ from datetime import datetime
 import copy
 import random
 import math
-import multiprocessing
+import concurrent.futures
 import pickle # For deep copying complex objects like GameState
+
 import hashlib
 import traceback
 from utils import format_move_for_print, algebraic_to_coords, get_piece_color, get_opposite_color, is_on_board
 from config import BOARD_SIZE
 
-# Set multiprocessing start method to 'fork' for macOS (faster and more reliable)
-try:
-    multiprocessing.set_start_method('fork', force=True)
-except RuntimeError:
-    pass  # Already set
+# Multiprocessing start method handling is done via concurrent.futures context
+
 
  
 
@@ -63,10 +61,8 @@ CACHE_ENABLED = True
 NUM_WORKERS = 7  # Оставляем 1 core свободным
 
 # --- Training Time Configuration ---
-def is_training_time():
-    """Check if current time is between 2 AM and 10 AM"""
-    current_hour = datetime.now().hour
-    return 2 <= current_hour < 10
+# is_training_time removed as it is handled by the main loop
+
 
 # --- Constants ---
 CHECKMATE_SCORE = 1000000 # Large score for checkmate
@@ -666,18 +662,19 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
 
     best_move_for_depth = None
     orig_alpha, orig_beta = alpha, beta
+    best_move_for_depth = None
+    orig_alpha, orig_beta = alpha, beta
+    
     if maximizing_player: # White
         max_eval = -float('inf')
         for move in legal_moves:
-            next_state = copy.deepcopy(gamestate)
-            move_made = next_state.make_move(move, is_check_game_over=False)
-            if not move_made: continue
-            if next_state.needs_promotion_choice:
-                 best_prom_piece = 'Q' # Auto-promote to Queen (or Rook)
-                 if 'Q' not in PROMOTION_PIECES_WHITE_STR and 'R' in PROMOTION_PIECES_WHITE_STR: best_prom_piece = 'R'
-                 if not next_state.complete_promotion(best_prom_piece): continue
-
-            eval_score, _ = minimax_alpha_beta(next_state, depth - 1, alpha, beta, False)
+            # OPTIMIZATION: Use reversible moves
+            gamestate.make_ai_move(move)
+            
+            eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, False)
+            
+            # Undo move
+            gamestate.undo_ai_move()
 
             if eval_score > max_eval:
                 max_eval = eval_score
@@ -685,7 +682,7 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
             alpha = max(alpha, eval_score)
             if alpha >= beta:
                 # Update killer moves and history for cutoff move
-                if best_move_for_depth and alpha >= beta:
+                if best_move_for_depth:
                     move_repr = repr(best_move_for_depth)
                     history_scores[move_repr] = history_scores.get(move_repr, 0) + depth * depth
                     if depth not in killer_moves:
@@ -699,15 +696,13 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
     else: # Black (Minimizing)
         min_eval = float('inf')
         for move in legal_moves:
-            next_state = copy.deepcopy(gamestate)
-            move_made = next_state.make_move(move, is_check_game_over=False)
-            if not move_made: continue
-            if next_state.needs_promotion_choice:
-                 best_prom_piece = 'q' # Auto-promote to queen (or rook)
-                 if 'q' not in PROMOTION_PIECES_BLACK_STR and 'r' in PROMOTION_PIECES_BLACK_STR: best_prom_piece = 'r'
-                 if not next_state.complete_promotion(best_prom_piece): continue
-
-            eval_score, _ = minimax_alpha_beta(next_state, depth - 1, alpha, beta, True)
+            # OPTIMIZATION: Use reversible moves
+            gamestate.make_ai_move(move)
+            
+            eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, True)
+            
+            # Undo move
+            gamestate.undo_ai_move()
 
             if eval_score < min_eval:
                 min_eval = eval_score
@@ -715,7 +710,7 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
             beta = min(beta, eval_score)
             if alpha >= beta:
                 # Update killer moves and history for cutoff move
-                if best_move_for_depth and alpha >= beta:
+                if best_move_for_depth:
                     move_repr = repr(best_move_for_depth)
                     history_scores[move_repr] = history_scores.get(move_repr, 0) + depth * depth
                     if depth not in killer_moves:
@@ -751,21 +746,14 @@ def evaluate_move_worker(args):
     """
     move, depth, alpha, beta, is_maximizing, gs_pickle_dump = args
     try:
+        # Deserialize the GameState copy for this worker
         gamestate_copy = pickle.loads(gs_pickle_dump)
 
-        move_made = gamestate_copy.make_move(move, is_check_game_over=False)
-        if not move_made:
-            return -float('inf') if is_maximizing else float('inf')
+        # Use make_ai_move for the root move of this worker
+        # Note: make_ai_move handles promotion automatically if passed in the move tuple
+        gamestate_copy.make_ai_move(move)
 
-        if gamestate_copy.needs_promotion_choice:
-            prom_piece = ''
-            if not is_maximizing: prom_piece = 'q' if 'q' in PROMOTION_PIECES_BLACK_STR else 'r'
-            else: prom_piece = 'Q' if 'Q' in PROMOTION_PIECES_WHITE_STR else 'R'
-            if not gamestate_copy.complete_promotion(prom_piece):
-                 print(f"Error completing auto-promotion in worker for {move}")
-                 return -float('inf') if is_maximizing else float('inf')
-
-        # Call the simplified minimax
+        # Call the optimized minimax (which uses make_ai_move/undo_ai_move internally)
         score, _ = minimax_alpha_beta(gamestate_copy, depth - 1, alpha, beta, not is_maximizing)
         return score
 
@@ -970,22 +958,41 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
 
         num_workers = NUM_WORKERS if NUM_WORKERS else multiprocessing.cpu_count()
         print(f"Using {num_workers} worker processes for depth {depth} search.")
-        pool = multiprocessing.Pool(processes=num_workers)
-        manager = multiprocessing.Manager()
-        shared_move_cache = manager.dict(move_cache)
+        
+        # Use ProcessPoolExecutor for better cleanup
+        with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # We need to pass the move cache, but Manager is tricky with Executor.
+            # For now, we'll skip sharing the cache dynamically during the parallel step
+            # to avoid complexity and overhead. Workers will use their local cache (empty)
+            # or we can pass a copy. Passing a copy is safer.
+            # Actually, the worker function signature expects move_cache.
+            # We can pass None or an empty dict if we don't want to sync.
+            # Syncing via Manager with Executor is possible but 'multiprocessing.Manager'
+            # creates a server process which we want to avoid if it causes issues.
+            # Let's pass None for now and rely on the main process to update the cache
+            # based on results.
+            
+            futures = []
+            for move in legal_moves:
+                try:
+                    # Serialize here to ensure clean copy for each task
+                    gamestate_dump = pickle.dumps(gamestate)
+                except:
+                    print(f"Error pickling gamestate for move {move}")
+                    continue
+                    
+                maximizing_player = (gamestate.current_turn == 'w')
+                # Submit task
+                future = executor.submit(_minimax_worker, move, gamestate_dump, depth, -float('inf'), float('inf'), maximizing_player, None)
+                futures.append(future)
 
-        tasks = []
-        for move in legal_moves:
-            try:
-                gamestate_copy = pickle.loads(pickle.dumps(gamestate))
-            except:
-                gamestate_copy = gamestate.copy()
-            maximizing_player = (gamestate.current_turn == 'w')
-            tasks.append((move, gamestate_copy, depth, -float('inf'), float('inf'), maximizing_player, shared_move_cache))
-
-        results = pool.starmap(_minimax_worker, tasks)
-        pool.close()
-        pool.join()
+            results = []
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    res = future.result()
+                    results.append(res)
+                except Exception as e:
+                    print(f"Worker task failed: {e}")
 
         all_results = []
         for result in results:
@@ -1056,15 +1063,16 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
              result = (None, 0, []) if return_all_scores else (None, 0)
              return result
 
-def _minimax_worker(move, gamestate_copy, depth, alpha, beta, maximizing_player, move_cache):
+def _minimax_worker(move, gamestate_dump, depth, alpha, beta, maximizing_player, move_cache):
     """Minimax function for a single move, executed by a worker process."""
     # print(f"Worker evaluating move: {move}, Depth: {depth}, Max: {maximizing_player}")
-    start_time = time.time()
     try:
-        # Make the move for which this worker is responsible
-        if not gamestate_copy.make_move(move, is_check_game_over=False):
-            # Return a bad score if the initial move is illegal (should not happen)
-            return move, -CHECKMATE_SCORE if maximizing_player else CHECKMATE_SCORE
+        # Deserialize inside the worker
+        gamestate_copy = pickle.loads(gamestate_dump)
+        
+        # Make the move for which this worker is responsible using optimized method
+        # Note: make_ai_move handles promotion if it's in the move tuple
+        gamestate_copy.make_ai_move(move)
 
         # --- NO CACHE CHECK HERE - Cache check is done inside recursive calls --- 
         # current_hash = get_position_hash(gamestate_copy)
@@ -1111,16 +1119,16 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
     if maximizing_player: # White trying to maximize
         max_eval = -float('inf')
         for move in legal_moves:
-            # Create a fast copy for this branch to avoid needing undo
-            next_state = gamestate.fast_copy_for_simulation()
-            if not next_state.make_move(move, is_check_game_over=False): continue # Skip illegal moves
+            # OPTIMIZATION: Use reversible moves
+            gamestate.make_ai_move(move)
             
-            eval_score = _minimax_recursive(next_state, depth - 1, alpha, beta, False) # Recursive call for Black
-            # No undo needed - we used a copy
+            eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False) # Recursive call for Black
+            
+            # Undo move
+            gamestate.undo_ai_move()
 
             # <<< Mate Check >>>
             if eval_score >= CHECKMATE_SCORE: 
-                # This move leads to White checkmating Black
                 return CHECKMATE_SCORE # Return mate score immediately
             
             max_eval = max(max_eval, eval_score)
@@ -1132,16 +1140,16 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
     else: # Minimizing player (Black trying to minimize)
         min_eval = float('inf')
         for move in legal_moves:
-            # Create a fast copy for this branch to avoid needing undo
-            next_state = gamestate.fast_copy_for_simulation()
-            if not next_state.make_move(move, is_check_game_over=False): continue
+            # OPTIMIZATION: Use reversible moves
+            gamestate.make_ai_move(move)
             
-            eval_score = _minimax_recursive(next_state, depth - 1, alpha, beta, True) # Recursive call for White
-            # No undo needed - we used a copy
+            eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True) # Recursive call for White
+            
+            # Undo move
+            gamestate.undo_ai_move()
 
             # <<< Mate Check >>>
             if eval_score <= -CHECKMATE_SCORE:
-                 # This move leads to Black checkmating White
                  return -CHECKMATE_SCORE # Return mate score immediately
             
             min_eval = min(min_eval, eval_score)
@@ -1177,11 +1185,13 @@ def _quiescence_search(gamestate: GameState, alpha, beta, maximizing_player, dep
         if not noisy_moves: return stand_pat_score # No noisy moves, return static eval
         
         for move in noisy_moves:
-             # Use fast copy instead of undo
-             next_state = gamestate.fast_copy_for_simulation()
-             if not next_state.make_move(move, is_check_game_over=False): continue
-             score = _quiescence_search(next_state, alpha, beta, False, depth - 1)
-             # No undo needed
+             # OPTIMIZATION: Use reversible moves
+             gamestate.make_ai_move(move)
+             
+             score = _quiescence_search(gamestate, alpha, beta, False, depth - 1)
+             
+             # Undo move
+             gamestate.undo_ai_move()
              
              # <<< Mate Check >>>
              if score >= CHECKMATE_SCORE:
@@ -1201,11 +1211,13 @@ def _quiescence_search(gamestate: GameState, alpha, beta, maximizing_player, dep
         if not noisy_moves: return stand_pat_score
         
         for move in noisy_moves:
-             # Use fast copy instead of undo
-             next_state = gamestate.fast_copy_for_simulation()
-             if not next_state.make_move(move, is_check_game_over=False): continue
-             score = _quiescence_search(next_state, alpha, beta, True, depth - 1)
-             # No undo needed
+             # OPTIMIZATION: Use reversible moves
+             gamestate.make_ai_move(move)
+             
+             score = _quiescence_search(gamestate, alpha, beta, True, depth - 1)
+             
+             # Undo move
+             gamestate.undo_ai_move()
              
              # <<< Mate Check >>>
              if score <= -CHECKMATE_SCORE:

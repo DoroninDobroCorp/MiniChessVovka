@@ -37,6 +37,8 @@ class GameState:
         self._all_legal_moves_cache = None
         self._is_check_cache = None
         self._hash_cache = None # Добавляем кэш для хэша
+        self.ai_history = [] # Stack for AI undo
+
 
     def save_state(self):
         """Сохраняет текущее состояние игры для возможности отмены хода"""
@@ -707,3 +709,126 @@ class GameState:
                  return True
 
         return False
+
+    # --- AI Optimized Move Handling ---
+
+    def make_ai_move(self, move):
+        """
+        Fast move application for AI search.
+        Assumes move is legal.
+        Saves state to self.ai_history for undo.
+        """
+        # 1. Save state info needed for undo
+        undo_info = {
+            'move': move,
+            'captured': None,
+            'prev_king_pos': None,
+            'prev_checkmate': self.checkmate,
+            'prev_stalemate': self.stalemate,
+            'prev_last_move': self.last_move,
+            # 'prev_hash': self._hash_cache # If we use incremental hash
+        }
+        
+        # 2. Apply move
+        if move[0] == 'drop':
+            _, piece_code, (r, f) = move
+            color = piece_code[0]
+            piece_char = piece_code[1].upper() if color == 'w' else piece_code[1].lower()
+            piece_type_upper = piece_code[1]
+            
+            self.board[r][f] = piece_char
+            self.hands[color][piece_type_upper] -= 1
+            
+            self.last_move = move
+            self.current_turn = get_opposite_color(self.current_turn)
+            
+        else:
+            (r1, f1), (r2, f2), promotion = move
+            piece = self.board[r1][f1]
+            target = self.board[r2][f2]
+            color = get_piece_color(piece)
+            
+            # Handle capture
+            if target != EMPTY_SQUARE:
+                undo_info['captured'] = target
+                captured_type = target.upper()
+                self.hands[color][captured_type] = self.hands[color].get(captured_type, 0) + 1
+            
+            # Update board
+            self.board[r1][f1] = EMPTY_SQUARE
+            if promotion:
+                self.board[r2][f2] = promotion
+            else:
+                self.board[r2][f2] = piece
+                
+            # Update King pos
+            if piece.upper() == 'K':
+                undo_info['prev_king_pos'] = self.king_pos[color]
+                self.king_pos[color] = (r2, f2)
+                
+            self.last_move = move
+            self.current_turn = get_opposite_color(self.current_turn)
+
+        # 3. Push to history
+        self.ai_history.append(undo_info)
+        
+        # 4. Invalidate caches
+        self._all_legal_moves_cache = None
+        
+        return True
+
+    def undo_ai_move(self):
+        """
+        Reverts the last move made by make_ai_move.
+        """
+        if not self.ai_history:
+            return False
+            
+        undo_info = self.ai_history.pop()
+        move = undo_info['move']
+        
+        # Revert turn
+        self.current_turn = get_opposite_color(self.current_turn)
+        
+        if move[0] == 'drop':
+            _, piece_code, (r, f) = move
+            color = piece_code[0]
+            piece_type_upper = piece_code[1]
+            
+            self.board[r][f] = EMPTY_SQUARE
+            self.hands[color][piece_type_upper] += 1
+            
+        else:
+            (r1, f1), (r2, f2), promotion = move
+            # Current board[r2][f2] is the piece that moved (or promoted)
+            moved_piece = self.board[r2][f2]
+            
+            # If promotion, we need to revert to pawn
+            if promotion:
+                color = get_piece_color(moved_piece)
+                moved_piece = 'P' if color == 'w' else 'p'
+            
+            # Move back
+            self.board[r1][f1] = moved_piece
+            
+            # Restore captured
+            captured = undo_info['captured']
+            if captured:
+                self.board[r2][f2] = captured
+                color = get_piece_color(moved_piece)
+                self.hands[color][captured.upper()] -= 1
+            else:
+                self.board[r2][f2] = EMPTY_SQUARE
+                
+            # Restore King pos
+            if undo_info['prev_king_pos']:
+                color = get_piece_color(moved_piece)
+                self.king_pos[color] = undo_info['prev_king_pos']
+
+        # Restore flags
+        self.checkmate = undo_info['prev_checkmate']
+        self.stalemate = undo_info['prev_stalemate']
+        self.last_move = undo_info['prev_last_move']
+        
+        self._all_legal_moves_cache = None
+        return True
