@@ -549,7 +549,7 @@ def main():
     
     # Параметры самообучения
     num_games = None  # None = бесконечно, или укажите число
-    depth = 5         # Глубина поиска
+    depth = 6         # Глубина поиска (optimized: ~0.5s/move at depth 6)
     exploration_rate = 0.2  # 20% вероятность выбора 2-го лучшего хода
     
     run_self_play_training(num_games, depth, exploration_rate)

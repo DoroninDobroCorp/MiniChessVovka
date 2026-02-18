@@ -439,6 +439,20 @@ def evaluate_position(gamestate: GameState):
 
 
 # --- Quiescence Search ---
+def is_noisy_move(gamestate, move):
+    """Check if move is a capture, promotion, or drop (tactical move)."""
+    try:
+        if isinstance(move, tuple) and move and move[0] == 'drop':
+            return True  # Drops are tactical in Crazyhouse
+        (start_r, start_c), (end_r, end_c), promotion = move
+        if gamestate.board[end_r][end_c] != EMPTY_SQUARE:
+            return True  # Capture
+        if promotion is not None:
+            return True  # Promotion
+    except Exception:
+        pass
+    return False
+
 def get_noisy_moves(gamestate: GameState):
     """ Get captures, promotions, maybe checks? """
     moves = gamestate.get_all_legal_moves()
@@ -470,10 +484,12 @@ def quiescence_search(gamestate: GameState, alpha, beta, depth):
     if depth == 0:
         return stand_pat_score
 
-    # Delta Pruning (simple version): If current eval + big margin < alpha, prune
-    # BIG_MARGIN = PIECE_VALUES['R'] # e.g., value of a rook
-    # if stand_pat_score < alpha - BIG_MARGIN:
-    #      return alpha
+    # Delta Pruning: if position is so bad that even winning a rook won't help, prune
+    DELTA_MARGIN = PIECE_VALUES['R']
+    if gamestate.current_turn == 'w' and stand_pat_score < alpha - DELTA_MARGIN:
+        return alpha
+    if gamestate.current_turn != 'w' and stand_pat_score > beta + DELTA_MARGIN:
+        return beta
 
     if gamestate.current_turn == 'w': # Maximizing
         if stand_pat_score >= beta:
@@ -485,15 +501,13 @@ def quiescence_search(gamestate: GameState, alpha, beta, depth):
         noisy_moves.sort(key=lambda m: mvv_lva_score(gamestate, m), reverse=True)
 
         for move in noisy_moves:
-            next_state = copy.deepcopy(gamestate)
-            move_made = next_state.make_move(move, is_check_game_over=False)
-            if not move_made: continue
-            if next_state.needs_promotion_choice:
-                 best_prom_piece = 'Q'
-                 if 'Q' not in PROMOTION_PIECES_WHITE_STR and 'R' in PROMOTION_PIECES_WHITE_STR: best_prom_piece = 'R'
-                 if not next_state.complete_promotion(best_prom_piece): continue
+            # Use reversible moves instead of deepcopy for performance
+            gamestate.make_ai_move(move)
 
-            score = quiescence_search(next_state, alpha, beta, depth - 1)
+            score = quiescence_search(gamestate, alpha, beta, depth - 1)
+
+            gamestate.undo_ai_move()
+
             alpha = max(alpha, score)
             if alpha >= beta:
                 return beta # Fail high (cutoff)
@@ -508,15 +522,13 @@ def quiescence_search(gamestate: GameState, alpha, beta, depth):
         noisy_moves.sort(key=lambda m: mvv_lva_score(gamestate, m), reverse=True)
 
         for move in noisy_moves:
-            next_state = copy.deepcopy(gamestate)
-            move_made = next_state.make_move(move, is_check_game_over=False)
-            if not move_made: continue
-            if next_state.needs_promotion_choice:
-                 best_prom_piece = 'q'
-                 if 'q' not in PROMOTION_PIECES_BLACK_STR and 'r' in PROMOTION_PIECES_BLACK_STR: best_prom_piece = 'r'
-                 if not next_state.complete_promotion(best_prom_piece): continue
+            # Use reversible moves instead of deepcopy for performance
+            gamestate.make_ai_move(move)
 
-            score = quiescence_search(next_state, alpha, beta, depth - 1)
+            score = quiescence_search(gamestate, alpha, beta, depth - 1)
+
+            gamestate.undo_ai_move()
+
             beta = min(beta, score)
             if alpha >= beta:
                 return alpha # Fail low (cutoff)
@@ -617,9 +629,9 @@ def mvv_lva_score(gamestate, move):
 
 
 # --- Minimax with Alpha-Beta (Simplified - No TT logic inside) ---
-def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_player):
+def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_player, allow_null=True):
     """
-    Performs minimax search with alpha-beta pruning.
+    Performs minimax search with alpha-beta pruning and null-move pruning.
     Does NOT interact with the move cache directly.
     Returns: (score, best_move_found_at_this_node)
     """
@@ -646,6 +658,28 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
         if alpha >= beta:
             return tt_entry['score'], tt_entry.get('best_move')
 
+    # --- Null-Move Pruning ---
+    # Skip if: in check, depth too shallow, or endgame (few pieces)
+    NULL_MOVE_R = 2  # Reduction factor
+    current_color = 'w' if maximizing_player else 'b'
+    if (allow_null and depth >= NULL_MOVE_R + 1 
+            and not gamestate.is_in_check(current_color)):
+        # Make null move (just flip turn)
+        gamestate.current_turn = get_opposite_color(gamestate.current_turn)
+        gamestate._all_legal_moves_cache = None
+        
+        null_score, _ = minimax_alpha_beta(gamestate, depth - 1 - NULL_MOVE_R, 
+                                            alpha, beta, not maximizing_player, allow_null=False)
+        
+        # Undo null move
+        gamestate.current_turn = get_opposite_color(gamestate.current_turn)
+        gamestate._all_legal_moves_cache = None
+        
+        if maximizing_player and null_score >= beta:
+            return beta, None
+        if not maximizing_player and null_score <= alpha:
+            return alpha, None
+
     # Advanced move ordering: TT best-move first, then killer moves, then MVV-LVA + history
     tt_best = tt_entry.get('best_move') if tt_entry else None
     killers = killer_moves.get(depth, [])
@@ -662,26 +696,36 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
 
     best_move_for_depth = None
     orig_alpha, orig_beta = alpha, beta
-    best_move_for_depth = None
-    orig_alpha, orig_beta = alpha, beta
+    
+    # LMR parameters
+    LMR_FULL_DEPTH_MOVES = 4  # Search first N moves at full depth
+    LMR_REDUCTION_LIMIT = 3   # Don't reduce below this depth
     
     if maximizing_player: # White
         max_eval = -float('inf')
-        for move in legal_moves:
-            # OPTIMIZATION: Use reversible moves
+        for i, move in enumerate(legal_moves):
+            # Check if noisy BEFORE making the move (board state is still original)
+            noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
-            eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, False)
+            # Late Move Reduction: reduce depth for late quiet moves
+            if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT 
+                    and not noisy):
+                # Reduced search
+                eval_score, _ = minimax_alpha_beta(gamestate, depth - 2, alpha, beta, False)
+                # Re-search at full depth if score improves
+                if eval_score > alpha:
+                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, False)
+            else:
+                eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, False)
             
-            # Undo move
             gamestate.undo_ai_move()
 
             if eval_score > max_eval:
                 max_eval = eval_score
-                best_move_for_depth = move # Store the move that led to max_eval
+                best_move_for_depth = move
             alpha = max(alpha, eval_score)
             if alpha >= beta:
-                # Update killer moves and history for cutoff move
                 if best_move_for_depth:
                     move_repr = repr(best_move_for_depth)
                     history_scores[move_repr] = history_scores.get(move_repr, 0) + depth * depth
@@ -695,21 +739,26 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
         final_score = max_eval
     else: # Black (Minimizing)
         min_eval = float('inf')
-        for move in legal_moves:
-            # OPTIMIZATION: Use reversible moves
+        for i, move in enumerate(legal_moves):
+            noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
-            eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, True)
+            # Late Move Reduction
+            if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
+                    and not noisy):
+                eval_score, _ = minimax_alpha_beta(gamestate, depth - 2, alpha, beta, True)
+                if eval_score < beta:
+                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, True)
+            else:
+                eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, True)
             
-            # Undo move
             gamestate.undo_ai_move()
 
             if eval_score < min_eval:
                 min_eval = eval_score
-                best_move_for_depth = move # Store the move that led to min_eval
+                best_move_for_depth = move
             beta = min(beta, eval_score)
             if alpha >= beta:
-                # Update killer moves and history for cutoff move
                 if best_move_for_depth:
                     move_repr = repr(best_move_for_depth)
                     history_scores[move_repr] = history_scores.get(move_repr, 0) + depth * depth
@@ -821,8 +870,7 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1):
     best_score = -float('inf') if is_maximizing else float('inf')
     best_move = None
 
-    gs_copy_for_moves = copy.deepcopy(gamestate)
-    legal_moves = gs_copy_for_moves.get_all_legal_moves()
+    legal_moves = gamestate.get_all_legal_moves()
 
     if not legal_moves:
         print("AI Error: No legal moves available!")
@@ -832,7 +880,7 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1):
 
     if len(legal_moves) == 1:
         print("Only one legal move available.")
-        best_move = copy.deepcopy(legal_moves[0])
+        best_move = legal_moves[0]
         cache_key = (pos_hash, depth)
         move_cache[cache_key] = repr(best_move)
         print(f"[CACHE STORE] Hash {pos_hash} Depth {depth}: Stored single legal move {repr(best_move)}.")
@@ -1096,8 +1144,8 @@ def _minimax_worker(move, gamestate_dump, depth, alpha, beta, maximizing_player,
         error_score = -CHECKMATE_SCORE if maximizing_player else CHECKMATE_SCORE # Assign worst score
         return move, error_score
 
-def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_player):
-    """Recursive helper for minimax with alpha-beta pruning and mate priority."""
+def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_player, allow_null=True):
+    """Recursive helper for minimax with alpha-beta pruning, null-move pruning, LMR, and mate priority."""
 
     # --- Terminal State Check --- (Check BEFORE depth limit)
     legal_moves = gamestate.get_all_legal_moves() # Get moves for the player whose turn it IS
@@ -1115,21 +1163,50 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
         # Evaluate quiescent state
         return _quiescence_search(gamestate, alpha, beta, maximizing_player, MAX_QUIESCENCE_DEPTH)
 
-    # --- Move Iteration with Mate Priority (using fast copy instead of undo) --- 
+    # --- Null-Move Pruning ---
+    NULL_MOVE_R = 2
+    current_color = 'w' if maximizing_player else 'b'
+    if (allow_null and depth >= NULL_MOVE_R + 1
+            and not gamestate.is_in_check(current_color)):
+        gamestate.current_turn = get_opposite_color(gamestate.current_turn)
+        gamestate._all_legal_moves_cache = None
+        
+        null_score = _minimax_recursive(gamestate, depth - 1 - NULL_MOVE_R,
+                                        alpha, beta, not maximizing_player, allow_null=False)
+        
+        gamestate.current_turn = get_opposite_color(gamestate.current_turn)
+        gamestate._all_legal_moves_cache = None
+        
+        if maximizing_player and null_score >= beta:
+            return beta
+        if not maximizing_player and null_score <= alpha:
+            return alpha
+
+    # LMR parameters
+    LMR_FULL_DEPTH_MOVES = 4
+    LMR_REDUCTION_LIMIT = 3
+
+    # --- Move Iteration with Mate Priority and LMR ---
     if maximizing_player: # White trying to maximize
         max_eval = -float('inf')
-        for move in legal_moves:
-            # OPTIMIZATION: Use reversible moves
+        for i, move in enumerate(legal_moves):
+            noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
-            eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False) # Recursive call for Black
+            # Late Move Reduction
+            if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
+                    and not noisy):
+                eval_score = _minimax_recursive(gamestate, depth - 2, alpha, beta, False)
+                if eval_score > alpha:
+                    eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False)
+            else:
+                eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False)
             
-            # Undo move
             gamestate.undo_ai_move()
 
             # <<< Mate Check >>>
             if eval_score >= CHECKMATE_SCORE: 
-                return CHECKMATE_SCORE # Return mate score immediately
+                return CHECKMATE_SCORE
             
             max_eval = max(max_eval, eval_score)
             alpha = max(alpha, eval_score)
@@ -1139,18 +1216,24 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
 
     else: # Minimizing player (Black trying to minimize)
         min_eval = float('inf')
-        for move in legal_moves:
-            # OPTIMIZATION: Use reversible moves
+        for i, move in enumerate(legal_moves):
+            noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
-            eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True) # Recursive call for White
+            # Late Move Reduction
+            if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
+                    and not noisy):
+                eval_score = _minimax_recursive(gamestate, depth - 2, alpha, beta, True)
+                if eval_score < beta:
+                    eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True)
+            else:
+                eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True)
             
-            # Undo move
             gamestate.undo_ai_move()
 
             # <<< Mate Check >>>
             if eval_score <= -CHECKMATE_SCORE:
-                 return -CHECKMATE_SCORE # Return mate score immediately
+                 return -CHECKMATE_SCORE
             
             min_eval = min(min_eval, eval_score)
             beta = min(beta, eval_score)
@@ -1175,6 +1258,13 @@ def _quiescence_search(gamestate: GameState, alpha, beta, maximizing_player, dep
              
     if depth == 0:
         return stand_pat_score # Depth limit reached
+
+    # Delta Pruning
+    DELTA_MARGIN = PIECE_VALUES['R']
+    if maximizing_player and stand_pat_score < alpha - DELTA_MARGIN:
+        return alpha
+    if not maximizing_player and stand_pat_score > beta + DELTA_MARGIN:
+        return beta
 
     if maximizing_player:
         if stand_pat_score >= beta:

@@ -32,7 +32,7 @@ class GameState:
         # По умолчанию: оба игрока - люди (AI можно включить через кнопки в GUI)
         self.white_ai_enabled = False  # По умолчанию: игрок играет за белых
         self.black_ai_enabled = False  # По умолчанию: игрок играет за черных (включи AI кнопкой!)
-        self.ai_depth = 6  # Conservative depth with proper caching (deepcopy is slow, needs optimization)
+        self.ai_depth = 8  # Increased depth thanks to null-move pruning, LMR, and deepcopy removal
         self.show_hint = False # Note: show_hint itself is global in main.py
         self._all_legal_moves_cache = None
         self._is_check_cache = None
@@ -577,35 +577,16 @@ class GameState:
 
         legal_moves = []
         current_color = self.current_turn
-        # Вызываем generate_all_pseudo_legal_moves для ТЕКУЩЕГО объекта (self)
-        # Он использует self.board и self.hands
         pseudo_legal_moves = self.generate_all_pseudo_legal_moves(current_color)
 
-        # Для проверки легальности нам все еще нужно симулировать ходы
-        # Сохраняем состояние ТЕКУЩЕГО объекта (не нужно, симулируем на копии)
-        # original_board = copy.deepcopy(self.board)
-        # original_hands = copy.deepcopy(self.hands)
-        # original_king_pos = copy.deepcopy(self.king_pos)
-
         for move in pseudo_legal_moves:
-            # Создаем копию ТЕКУЩЕГО объекта для симуляции
-            temp_game_state = self.copy()
-
-            # --- Новая симуляция с использованием копии GameState ---
-            # Пытаемся сделать ход на КОПИИ
-            move_made = temp_game_state.make_move(move, is_check_game_over=False) # Не проверяем game over внутри симуляции
-            if move_made:
-                 # После хода проверяем, не оказался ли король ТЕКУЩЕГО игрока под шахом на доске копии
-                 is_check_after = temp_game_state.is_in_check(current_color)
-                 if not is_check_after:
-                      legal_moves.append(move) # Ход легален
-                 # else:
-
-                 #    print(f"[DEBUG Legality Check] Move {move} for {current_color} is ILLEGAL (king in check after)")
-            # else:
-
-            #    print(f"[DEBUG Legality Check] Move {move} for {current_color} FAILED simulation (make_move returned False)")
-            # --- Конец новой симуляции ---
+            # Use fast make/undo instead of deepcopy for legality check
+            self.make_ai_move(move)
+            is_check_after = self.is_in_check(current_color)
+            self.undo_ai_move()
+            
+            if not is_check_after:
+                legal_moves.append(move)
 
         self._all_legal_moves_cache = legal_moves
         return legal_moves
@@ -774,6 +755,8 @@ class GameState:
         
         # 4. Invalidate caches
         self._all_legal_moves_cache = None
+        self._hash_cache = None
+        self._is_check_cache = None
         
         return True
 
@@ -831,4 +814,6 @@ class GameState:
         self.last_move = undo_info['prev_last_move']
         
         self._all_legal_moves_cache = None
+        self._hash_cache = None
+        self._is_check_cache = None
         return True
