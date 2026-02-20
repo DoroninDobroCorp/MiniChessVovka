@@ -988,17 +988,6 @@ def handle_promotion(page, promotion_piece, to_grid_col, to_grid_row):
 
 # ── AI Decision ─────────────────────────────────────────────
 
-def _would_repeat(gamestate, move, position_history):
-    """Check if making this move would lead to a position we've seen 2+ times already."""
-    import copy
-    gs_copy = copy.deepcopy(gamestate)
-    try:
-        gs_copy.make_move(move, is_check_game_over=False)
-        future_hash = get_position_hash(gs_copy)
-        return position_history.get(future_hash, 0) >= 2
-    except Exception:
-        return False
-
 
 def get_ai_move(gamestate, our_color, position_history=None, moves_from_pos=None):
     """Get the best move from cache or AI engine, avoiding threefold repetition."""
@@ -1015,25 +1004,19 @@ def get_ai_move(gamestate, our_color, position_history=None, moves_from_pos=None
     pos_hash = get_position_hash(gamestate)
     print(f"   🔑 Position hash: {pos_hash[:16]}...")
     
-    # Repetition avoidance — ALWAYS active
+    # Simple repetition avoidance: if we've been in this EXACT position before,
+    # don't play the same move we played last time (prevents cycles)
     pos_count = position_history.get(pos_hash, 0) if position_history else 0
     played_before = moves_from_pos.get(pos_hash, set()) if moves_from_pos else set()
-    has_history = bool(position_history)
     
-    if pos_count >= 2:
-        print(f"   🔄 Position seen {pos_count}x! Avoiding: {[format_move_for_print(m) for m in played_before]}")
+    if pos_count >= 2 and played_before:
+        print(f"   🔄 Position seen {pos_count}x! Will avoid: {[format_move_for_print(m) for m in played_before]}")
     
-    def _is_repetition_move(move):
-        """Check if move should be avoided due to repetition risk."""
-        if not has_history:
+    def _is_repeat(move):
+        """Only block moves we already played from this exact position (seen 2+ times)."""
+        if pos_count < 2 or not played_before:
             return False
-        # Layer 1: never replay the same move from a position we've seen 2+ times
-        if pos_count >= 2 and repr(move) in {repr(m) for m in played_before}:
-            return True
-        # Layer 2: ALWAYS avoid moves leading to positions already seen 2+ times
-        if _would_repeat(gamestate, move, position_history):
-            return True
-        return False
+        return repr(move) in {repr(m) for m in played_before}
     
     # Try cache first
     for depth in [6, 5, 4, 3]:
@@ -1043,8 +1026,8 @@ def get_ai_move(gamestate, our_color, position_history=None, moves_from_pos=None
             try:
                 best_move = eval(cached)
                 if best_move in legal_moves:
-                    if _is_repetition_move(best_move):
-                        print(f"   🔄 CACHE HIT at depth {depth}: {format_move_for_print(best_move)} — SKIPPED (repetition risk)")
+                    if _is_repeat(best_move):
+                        print(f"   🔄 CACHE HIT depth {depth}: {format_move_for_print(best_move)} — SKIPPED (repetition)")
                         continue
                     print(f"   ✅ CACHE HIT at depth {depth}: {format_move_for_print(best_move)}")
                     return best_move
@@ -1055,23 +1038,23 @@ def get_ai_move(gamestate, our_color, position_history=None, moves_from_pos=None
     try:
         best_move = find_best_move(gamestate, depth=6, time_limit=45)
         if best_move:
-            if _is_repetition_move(best_move):
-                print(f"   🔄 AI move {format_move_for_print(best_move)} risks repetition, finding alternative...")
+            if _is_repeat(best_move):
+                print(f"   🔄 AI move {format_move_for_print(best_move)} is a repeat, finding alternative...")
                 try:
                     top_moves = find_best_move(gamestate, depth=4, return_top_n=5, time_limit=15)
                     if isinstance(top_moves, list):
                         for alt_move, alt_score in top_moves:
-                            if not _is_repetition_move(alt_move):
+                            if not _is_repeat(alt_move):
                                 print(f"   🤖 AI alternative: {format_move_for_print(alt_move)} (score: {alt_score:.0f})")
                                 return alt_move
                 except Exception:
                     pass
-                # All alternatives also repeat — pick any legal move we haven't played
+                # Pick any legal move we haven't tried from this position
                 for m in legal_moves:
                     if repr(m) not in {repr(p) for p in played_before}:
-                        print(f"   🎯 Fallback non-repeating move: {format_move_for_print(m)}")
+                        print(f"   🎯 Fallback non-repeating: {format_move_for_print(m)}")
                         return m
-                print(f"   ⚠️  No non-repeating move possible, playing AI choice")
+                print(f"   ⚠️  All moves repeat, playing AI choice anyway")
             print(f"   🤖 AI move: {format_move_for_print(best_move)}")
             return best_move
     except Exception as e:
@@ -1233,17 +1216,6 @@ def play_game(page):
         if pos_hash not in moves_from_pos:
             moves_from_pos[pos_hash] = set()
         moves_from_pos[pos_hash].add(best_move)
-        
-        # Track position after our move (opponent's turn) for _would_repeat
-        try:
-            gs_after = read_board_from_dom(page)
-            if gs_after:
-                opp_color = 'b' if our_color == 'w' else 'w'
-                gs_after.current_turn = opp_color
-                after_hash = get_position_hash(gs_after)
-                position_history[after_hash] = position_history.get(after_hash, 0) + 1
-        except Exception:
-            pass
         
         # Wait for opponent's move (or game end)
         print(f"   ⏳ Waiting for opponent...")
