@@ -25,3 +25,10 @@ venv/
 # IDE
 .vscode/
 .idea/
+move_cache.db.pre_fix_backup
+
+# Logs
+monitor.log
+scheduler.log
+watchdog.log
+*.log

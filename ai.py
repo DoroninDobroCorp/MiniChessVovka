@@ -453,14 +453,36 @@ def is_noisy_move(gamestate, move):
         pass
     return False
 
+def _is_drop_near_king(gamestate, move):
+    """Check if a drop lands adjacent to (or attacks) the enemy king."""
+    _, piece_code, (dr, df) = move
+    drop_color = piece_code[0]
+    enemy_color = 'b' if drop_color == 'w' else 'w'
+    enemy_king_pos = gamestate.king_pos.get(enemy_color)
+    if not enemy_king_pos:
+        return False
+    kr, kf = enemy_king_pos
+    piece_type = piece_code[1].upper()
+    # Knight drops: check if square attacks the king
+    if piece_type == 'N':
+        if (kr - dr, kf - df) in KNIGHT_MOVES:
+            return True
+    # Any piece dropped adjacent to king (distance <= 2) is tactical
+    if max(abs(dr - kr), abs(df - kf)) <= 2:
+        return True
+    return False
+
+
 def get_noisy_moves(gamestate: GameState):
-    """ Get captures, promotions, maybe checks? """
+    """Get tactical moves for quiescence: captures, promotions, and drops near enemy king."""
     moves = gamestate.get_all_legal_moves()
     noisy_moves = []
     for move in moves:
         try:
-            # Drop moves are not inherently captures; skip them in quiescence
             if isinstance(move, tuple) and move and move[0] == 'drop':
+                # Include drops that land near the enemy king (tactical threats)
+                if _is_drop_near_king(gamestate, move):
+                    noisy_moves.append(move)
                 continue
             # Normal move: ((r1,f1),(r2,f2), promotion)
             (start_r, start_c), (end_r, end_c), promotion = move
@@ -469,7 +491,6 @@ def get_noisy_moves(gamestate: GameState):
             if is_capture or is_promotion:
                 noisy_moves.append(move)
         except Exception:
-            # If move format is unexpected, skip it
             continue
     return noisy_moves
 
@@ -659,11 +680,14 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
             return tt_entry['score'], tt_entry.get('best_move')
 
     # --- Null-Move Pruning ---
-    # Skip if: in check, depth too shallow, or endgame (few pieces)
+    # Skip if: in check, depth too shallow, or opponent has pieces in hand (crazyhouse drops are too dangerous)
     NULL_MOVE_R = 2  # Reduction factor
     current_color = 'w' if maximizing_player else 'b'
+    opponent_color = 'b' if maximizing_player else 'w'
+    opponent_hand_count = sum(gamestate.hands.get(opponent_color, {}).values())
     if (allow_null and depth >= NULL_MOVE_R + 1 
-            and not gamestate.is_in_check(current_color)):
+            and not gamestate.is_in_check(current_color)
+            and opponent_hand_count == 0):
         # Make null move (just flip turn)
         gamestate.current_turn = get_opposite_color(gamestate.current_turn)
         gamestate._all_legal_moves_cache = None
@@ -1044,18 +1068,43 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
                 result = (None, 0, []) if return_all_scores else (None, 0)
                 return result
             maximizing_player = (gamestate.current_turn == 'w')
-            for move in legal_moves:
-                # Submit task
-                future = executor.submit(_minimax_worker, move, gamestate_dump, depth, -float('inf'), float('inf'), maximizing_player, None)
+            
+            # Search first move sequentially to get a baseline score for aspiration window
+            first_move = legal_moves[0]
+            first_result = _minimax_worker(first_move, gamestate_dump, depth, -float('inf'), float('inf'), maximizing_player, None)
+            baseline_score = first_result[1] if first_result else 0
+            ASPIRATION_WINDOW = 150  # centipawns
+            asp_alpha = baseline_score - ASPIRATION_WINDOW
+            asp_beta = baseline_score + ASPIRATION_WINDOW
+            
+            # Search remaining moves in parallel with tighter window
+            for move in legal_moves[1:]:
+                future = executor.submit(_minimax_worker, move, gamestate_dump, depth, asp_alpha, asp_beta, maximizing_player, None)
                 futures.append(future)
 
-            results = []
+            results = [first_result]
+            re_search_moves = []
             for future in concurrent.futures.as_completed(futures):
                 try:
                     res = future.result()
-                    results.append(res)
+                    if res:
+                        move, score = res
+                        # If score is at window boundary, it may be truncated — re-search with full window
+                        if score is not None and (score <= asp_alpha or score >= asp_beta):
+                            re_search_moves.append(move)
+                        else:
+                            results.append(res)
                 except Exception as e:
                     print(f"Worker task failed: {e}")
+            
+            # Re-search moves that fell outside aspiration window with full alpha/beta
+            for move in re_search_moves:
+                try:
+                    res = _minimax_worker(move, gamestate_dump, depth, -float('inf'), float('inf'), maximizing_player, None)
+                    if res:
+                        results.append(res)
+                except Exception as e:
+                    print(f"Re-search failed for {move}: {e}")
 
         all_results = []
         for result in results:
@@ -1188,10 +1237,14 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
             return tt_entry['score']
 
     # --- Null-Move Pruning ---
+    # Skip when opponent has pieces in hand (crazyhouse drops make null-move dangerous)
     NULL_MOVE_R = 2
     current_color = 'w' if maximizing_player else 'b'
+    opponent_color = 'b' if maximizing_player else 'w'
+    opponent_hand_count = sum(gamestate.hands.get(opponent_color, {}).values())
     if (allow_null and depth >= NULL_MOVE_R + 1
-            and not gamestate.is_in_check(current_color)):
+            and not gamestate.is_in_check(current_color)
+            and opponent_hand_count == 0):
         gamestate.current_turn = get_opposite_color(gamestate.current_turn)
         gamestate._all_legal_moves_cache = None
         

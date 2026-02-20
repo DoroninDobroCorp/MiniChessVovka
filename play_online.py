@@ -180,8 +180,13 @@ def launch_chrome(profile_dir):
         "--use-mock-keychain",
         "--enable-features=NetworkService,NetworkServiceInProcess",
         "--window-size=1440,900",
-        "about:blank",
     ]
+    
+    # Headless mode for servers without display
+    if not os.environ.get("DISPLAY"):
+        args += ["--headless=new", "--no-sandbox", "--disable-gpu"]
+    
+    args.append("about:blank")
     
     # Kill any lingering Chrome with our profile before launching
     try:
@@ -989,8 +994,28 @@ def handle_promotion(page, promotion_piece, to_grid_col, to_grid_row):
 # ── AI Decision ─────────────────────────────────────────────
 
 
-def get_ai_move(gamestate, our_color, position_history=None, moves_from_pos=None):
-    """Get the best move from cache or AI engine, avoiding threefold repetition."""
+def _would_create_move_cycle(our_move_history, candidate_move):
+    """Check if playing candidate_move would create a repeated cycle of OUR moves.
+    
+    Detects repeating sequences of length 1-5, e.g.:
+      - length 1: A, A  (same move twice in a row)
+      - length 2: A, B, A, B
+      - length 3: A, B, C, A, B, C
+    Returns (True, cycle_len) if a cycle would form, else (False, 0).
+    """
+    if not our_move_history:
+        return False, 0
+    extended = [repr(m) for m in our_move_history] + [repr(candidate_move)]
+    for k in range(1, 6):
+        if len(extended) < 2 * k:
+            continue
+        if extended[-k:] == extended[-2 * k:-k]:
+            return True, k
+    return False, 0
+
+
+def get_ai_move(gamestate, our_color, our_move_history=None):
+    """Get the best move from cache or AI engine, avoiding move cycles."""
     gamestate.current_turn = our_color
     gamestate._all_legal_moves_cache = None
     
@@ -1004,19 +1029,15 @@ def get_ai_move(gamestate, our_color, position_history=None, moves_from_pos=None
     pos_hash = get_position_hash(gamestate)
     print(f"   🔑 Position hash: {pos_hash[:16]}...")
     
-    # Simple repetition avoidance: if we've been in this EXACT position before,
-    # don't play the same move we played last time (prevents cycles)
-    pos_count = position_history.get(pos_hash, 0) if position_history else 0
-    played_before = moves_from_pos.get(pos_hash, set()) if moves_from_pos else set()
+    if our_move_history is None:
+        our_move_history = []
     
-    if pos_count >= 2 and played_before:
-        print(f"   🔄 Position seen {pos_count}x! Will avoid: {[format_move_for_print(m) for m in played_before]}")
-    
-    def _is_repeat(move):
-        """Only block moves we already played from this exact position (seen 2+ times)."""
-        if pos_count < 2 or not played_before:
-            return False
-        return repr(move) in {repr(m) for m in played_before}
+    def _would_cycle(move):
+        """Check if this move would create a cycle in our recent move sequence."""
+        would, k = _would_create_move_cycle(our_move_history, move)
+        if would:
+            print(f"   🔄 Move {format_move_for_print(move)} would create cycle of length {k} — avoiding")
+        return would
     
     # Try cache first
     for depth in [6, 5, 4, 3]:
@@ -1026,8 +1047,8 @@ def get_ai_move(gamestate, our_color, position_history=None, moves_from_pos=None
             try:
                 best_move = eval(cached)
                 if best_move in legal_moves:
-                    if _is_repeat(best_move):
-                        print(f"   🔄 CACHE HIT depth {depth}: {format_move_for_print(best_move)} — SKIPPED (repetition)")
+                    if _would_cycle(best_move):
+                        print(f"   🔄 CACHE HIT depth {depth}: {format_move_for_print(best_move)} — SKIPPED (cycle)")
                         continue
                     print(f"   ✅ CACHE HIT at depth {depth}: {format_move_for_print(best_move)}")
                     return best_move
@@ -1038,23 +1059,23 @@ def get_ai_move(gamestate, our_color, position_history=None, moves_from_pos=None
     try:
         best_move = find_best_move(gamestate, depth=6, time_limit=45)
         if best_move:
-            if _is_repeat(best_move):
-                print(f"   🔄 AI move {format_move_for_print(best_move)} is a repeat, finding alternative...")
+            if _would_cycle(best_move):
+                print(f"   🔄 AI move {format_move_for_print(best_move)} creates cycle, finding alternative...")
                 try:
                     top_moves = find_best_move(gamestate, depth=4, return_top_n=5, time_limit=15)
                     if isinstance(top_moves, list):
                         for alt_move, alt_score in top_moves:
-                            if not _is_repeat(alt_move):
+                            if not _would_create_move_cycle(our_move_history, alt_move)[0]:
                                 print(f"   🤖 AI alternative: {format_move_for_print(alt_move)} (score: {alt_score:.0f})")
                                 return alt_move
                 except Exception:
                     pass
-                # Pick any legal move we haven't tried from this position
+                # Pick any legal move that doesn't create a cycle
                 for m in legal_moves:
-                    if repr(m) not in {repr(p) for p in played_before}:
-                        print(f"   🎯 Fallback non-repeating: {format_move_for_print(m)}")
+                    if not _would_create_move_cycle(our_move_history, m)[0]:
+                        print(f"   🎯 Fallback non-cycling: {format_move_for_print(m)}")
                         return m
-                print(f"   ⚠️  All moves repeat, playing AI choice anyway")
+                print(f"   ⚠️  All moves create cycles, playing AI choice anyway")
             print(f"   🤖 AI move: {format_move_for_print(best_move)}")
             return best_move
     except Exception as e:
@@ -1123,8 +1144,7 @@ def play_game(page):
     """Main game loop — read board, decide move, play it."""
     our_color = detect_our_color(page)
     moves_made = 0
-    position_history = {}   # hash → count, to detect repetition
-    moves_from_pos = {}     # hash → set of moves already played from this position
+    our_move_history = []   # list of our moves in order, for cycle detection
     
     print(f"\n{'═' * 50}")
     print(f"♟️  GAME STARTED! We are {'WHITE ♙' if our_color == 'w' else 'BLACK ♟'}")
@@ -1152,18 +1172,12 @@ def play_game(page):
         
         gs.current_turn = our_color
         
-        # Track position for threefold repetition avoidance
-        pos_hash = get_position_hash(gs)
-        position_history[pos_hash] = position_history.get(pos_hash, 0) + 1
-        if position_history[pos_hash] >= 2:
-            print(f"   ⚠️  Position seen {position_history[pos_hash]}x — will avoid repetition")
-        
         print(f"\n{'─' * 40}")
         print(f"📍 Move #{moves_made + 1} ({'WHITE' if our_color == 'w' else 'BLACK'}) [DOM plies: {dom_moves}]")
         print_board(gs)
         
         # Get AI move
-        best_move = get_ai_move(gs, our_color, position_history=position_history, moves_from_pos=moves_from_pos)
+        best_move = get_ai_move(gs, our_color, our_move_history=our_move_history)
         if not best_move:
             print("   ❌ No move found!")
             time.sleep(2)
@@ -1212,10 +1226,8 @@ def play_game(page):
         
         moves_made += 1
         
-        # Record played move for repetition avoidance
-        if pos_hash not in moves_from_pos:
-            moves_from_pos[pos_hash] = set()
-        moves_from_pos[pos_hash].add(best_move)
+        # Record played move for cycle detection
+        our_move_history.append(best_move)
         
         # Wait for opponent's move (or game end)
         print(f"   ⏳ Waiting for opponent...")
@@ -1229,8 +1241,35 @@ def play_game(page):
                 print(f"   ♟️  Opponent moved (plies: {opp_moves})")
                 break
     
+    # Detect game result from DOM
+    result_text = "unknown"
+    try:
+        result_text = page.evaluate("""() => {
+            // Look for result text in common chess.com elements
+            const selectors = [
+                '.game-result', '.game-over-header-component',
+                '[class*=gameResult]', '[class*=game-result]',
+                '[class*=GameOver]', '.modal-game-over-header-component',
+                '.game-over-header-title-component'
+            ];
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el && el.textContent.trim()) return el.textContent.trim();
+            }
+            // Broader search for result patterns
+            const all = document.body.innerText;
+            const patterns = ['won', 'lost', 'draw', 'checkmate', 'resign', 'timeout', 'stalemate', 'aborted'];
+            for (const p of patterns) {
+                const idx = all.toLowerCase().indexOf(p);
+                if (idx >= 0) return all.substring(Math.max(0, idx - 30), idx + 40).trim();
+            }
+            return 'unknown';
+        }""")
+    except Exception:
+        pass
+    
     print(f"\n{'═' * 50}")
-    print(f"🏁 Game over after {moves_made} moves!")
+    print(f"🏁 Game over after {moves_made} moves! Result: {result_text}")
     print(f"{'═' * 50}")
     _screenshot(page, "game_over")
     
@@ -1454,7 +1493,7 @@ def auto_loop(page):
                 continue
 
         # Create game
-        if not create_minihouse_game(page, rated=True):
+        if not create_minihouse_game(page, rated=False):
             print("   ❌ Failed to create game. Retrying in 30s...")
             time.sleep(30)
             continue
@@ -1466,6 +1505,13 @@ def auto_loop(page):
 
         # Play the game
         play_game(page)
+
+        # Check for stop flag
+        stop_flag = Path(__file__).parent / ".stop_after_game"
+        if stop_flag.exists():
+            print("\n🛑 Stop flag detected! Stopping auto-loop.")
+            stop_flag.unlink()
+            return
 
         # Small pause before next game
         print("\n   ⏳ Waiting 5s before next game...")
