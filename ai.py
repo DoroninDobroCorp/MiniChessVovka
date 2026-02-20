@@ -38,6 +38,14 @@ MOBILITY_BONUS = 3 # Bonus per legal move
 PAWN_STRUCTURE_BONUS = 5 # Bonus for connected pawns (simple check)
 ATTACK_KING_ZONE_BONUS = 20 # Bonus for attacking squares near enemy king
 DROP_THREAT_BONUS = 25 # Extra bonus for having pieces in hand (drop threats)
+OPEN_FILE_ROOK_BONUS = 30 # Bonus for rook on a file with no friendly pawns
+SEMI_OPEN_FILE_ROOK_BONUS = 15 # Bonus for rook on a file with no enemy pawns blocked
+
+# Passed pawn bonus by distance to promotion (exponential scaling for 6x6 board)
+# Index = steps remaining to promotion rank (1=one step away, 4=just left start)
+PASSED_PAWN_BONUS = {1: 500, 2: 200, 3: 80, 4: 30}
+# Bonus for having pawns in hand that could be dropped near promotion
+DROP_PAWN_PROMO_BONUS = 250
 
 # --- Transposition Table (Now a simple Move Cache) ---
 # Stores: {(position_hash, depth): best_move_repr} - includes depth to avoid shallow cached moves
@@ -317,10 +325,26 @@ def evaluate_position(gamestate: GameState):
     # Less than ~2 Rooks worth of material left besides kings? Consider it endgame.
     phase = ENDGAME_PHASE if total_material < (2 * PIECE_VALUES['R'] + 2*PIECE_VALUES['K']) else OPENING_PHASE
 
-    # 2. Mobility (simple count of legal moves) - potentially expensive
-    # white_moves = len(gamestate.get_valid_moves_for_color('w')) # Assuming this function exists
-    # black_moves = len(gamestate.get_valid_moves_for_color('b')) # Assuming this function exists
-    # score += (white_moves - black_moves) * MOBILITY_BONUS
+    # 2. Mobility proxy (cheap: count pieces with at least one adjacent empty square)
+    white_mobile = 0
+    black_mobile = 0
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            piece = gamestate.board[r][c]
+            if piece == EMPTY_SQUARE or piece.upper() == 'K':
+                continue
+            has_adjacent_empty = False
+            for dr, dc in [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE and gamestate.board[nr][nc] == EMPTY_SQUARE:
+                    has_adjacent_empty = True
+                    break
+            if has_adjacent_empty:
+                if get_piece_color(piece) == 'w':
+                    white_mobile += 1
+                else:
+                    black_mobile += 1
+    score += (white_mobile - black_mobile) * MOBILITY_BONUS
 
     # 3. Pawn Structure (very simple: connected pawns)
     for r, c in white_pawns:
@@ -333,7 +357,9 @@ def evaluate_position(gamestate: GameState):
             if gamestate.board[scan_r][c] == 'p': is_passed = False; break
             if c > 0 and gamestate.board[scan_r][c-1] == 'p': is_passed = False; break
             if c < BOARD_SIZE-1 and gamestate.board[scan_r][c+1] == 'p': is_passed = False; break
-        if is_passed: score += (BOARD_SIZE - 1 - r) * 10 # Bonus increases closer to promotion
+        if is_passed:
+            steps_to_promo = r  # white pawn at row r needs r steps to reach row 0
+            score += PASSED_PAWN_BONUS.get(steps_to_promo, 15)
 
     for r, c in black_pawns:
         if c > 0 and gamestate.board[r][c-1] == 'p': score -= PAWN_STRUCTURE_BONUS
@@ -343,7 +369,9 @@ def evaluate_position(gamestate: GameState):
             if gamestate.board[scan_r][c] == 'P': is_passed = False; break
             if c > 0 and gamestate.board[scan_r][c-1] == 'P': is_passed = False; break
             if c < BOARD_SIZE-1 and gamestate.board[scan_r][c+1] == 'P': is_passed = False; break
-        if is_passed: score -= r * 10 # Bonus increases closer to promotion
+        if is_passed:
+            steps_to_promo = BOARD_SIZE - 1 - r  # black pawn at row r needs (5-r) steps to row 5
+            score -= PASSED_PAWN_BONUS.get(steps_to_promo, 15)
 
     # 4. King Safety (endgame vs opening)
     if phase == OPENING_PHASE:
@@ -373,67 +401,91 @@ def evaluate_position(gamestate: GameState):
                 black_undeveloped += 1
         score += black_undeveloped * 15
 
-    # 6. IMPROVED: King Attack Evaluation
-    # Count attacks on squares around enemy king
+    # 6. IMPROVED: King Attack Evaluation (proximity-based, no false attacks through pieces)
     if white_king_r != -1 and black_king_r != -1:
-        # Count white pieces attacking black king zone
         white_attackers_on_black_king = 0
-        for dr in [-1, 0, 1]:
-            for dc in [-1, 0, 1]:
-                if dr == 0 and dc == 0: continue
-                check_r, check_c = black_king_r + dr, black_king_c + dc
-                if is_on_board(check_r, check_c):
-                    # Check if any white piece attacks this square
-                    for r in range(BOARD_SIZE):
-                        for c in range(BOARD_SIZE):
-                            piece = gamestate.board[r][c]
-                            if piece != EMPTY_SQUARE and get_piece_color(piece) == 'w':
-                                # Simplified check: knights, bishops, rooks, queens
-                                piece_type = piece.upper()
-                                if piece_type == 'N':
-                                    if (check_r - r, check_c - c) in KNIGHT_MOVES:
-                                        white_attackers_on_black_king += 1
-                                elif piece_type in ['B', 'Q']:
-                                    # Diagonal attacks
-                                    if abs(check_r - r) == abs(check_c - c) and check_r != r:
-                                        # Check line is clear (simplified)
-                                        white_attackers_on_black_king += 0.5
-                                elif piece_type in ['R', 'Q']:
-                                    # Straight attacks
-                                    if (check_r == r or check_c == c) and not (check_r == r and check_c == c):
-                                        white_attackers_on_black_king += 0.5
+        black_attackers_on_white_king = 0
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                piece = gamestate.board[r][c]
+                if piece == EMPTY_SQUARE:
+                    continue
+                piece_type = piece.upper()
+                if piece_type == 'K':
+                    continue
+                color = get_piece_color(piece)
+                if color == 'w':
+                    # Distance to black king
+                    dist = max(abs(r - black_king_r), abs(c - black_king_c))
+                    if piece_type == 'N':
+                        if (black_king_r - r, black_king_c - c) in KNIGHT_MOVES:
+                            white_attackers_on_black_king += 2  # Knight directly attacks king
+                        elif dist <= 2:
+                            white_attackers_on_black_king += 0.5
+                    elif dist <= 2:
+                        white_attackers_on_black_king += 1
+                    elif dist <= 3 and piece_type in ('R', 'Q', 'B'):
+                        white_attackers_on_black_king += 0.3
+                else:
+                    dist = max(abs(r - white_king_r), abs(c - white_king_c))
+                    if piece_type == 'N':
+                        if (white_king_r - r, white_king_c - c) in KNIGHT_MOVES:
+                            black_attackers_on_white_king += 2
+                        elif dist <= 2:
+                            black_attackers_on_white_king += 0.5
+                    elif dist <= 2:
+                        black_attackers_on_white_king += 1
+                    elif dist <= 3 and piece_type in ('R', 'Q', 'B'):
+                        black_attackers_on_white_king += 0.3
         
         score += white_attackers_on_black_king * ATTACK_KING_ZONE_BONUS
-        
-        # Count black pieces attacking white king zone (mirror logic)
-        black_attackers_on_white_king = 0
-        for dr in [-1, 0, 1]:
-            for dc in [-1, 0, 1]:
-                if dr == 0 and dc == 0: continue
-                check_r, check_c = white_king_r + dr, white_king_c + dc
-                if is_on_board(check_r, check_c):
-                    for r in range(BOARD_SIZE):
-                        for c in range(BOARD_SIZE):
-                            piece = gamestate.board[r][c]
-                            if piece != EMPTY_SQUARE and get_piece_color(piece) == 'b':
-                                piece_type = piece.upper()
-                                if piece_type == 'N':
-                                    if (check_r - r, check_c - c) in KNIGHT_MOVES:
-                                        black_attackers_on_white_king += 1
-                                elif piece_type in ['B', 'Q']:
-                                    if abs(check_r - r) == abs(check_c - c) and check_r != r:
-                                        black_attackers_on_white_king += 0.5
-                                elif piece_type in ['R', 'Q']:
-                                    if (check_r == r or check_c == c) and not (check_r == r and check_c == c):
-                                        black_attackers_on_white_king += 0.5
-        
         score -= black_attackers_on_white_king * ATTACK_KING_ZONE_BONUS
 
     # 7. Tempo bonus for side to move (slight advantage)
     score += 10 if gamestate.current_turn == 'w' else -10
 
-    # Add a small random element to avoid identical choices? (Optional)
-    # score += random.uniform(-0.1, 0.1)
+    # 8. Drop pawn near promotion bonus
+    white_hand_pawns = gamestate.hands.get('w', {}).get('P', 0)
+    black_hand_pawns = gamestate.hands.get('b', {}).get('P', 0)
+    if white_hand_pawns > 0:
+        # Count empty squares on rank 5 (row 1) where white can drop and promote next move
+        for c in range(BOARD_SIZE):
+            if gamestate.board[1][c] == EMPTY_SQUARE:
+                score += DROP_PAWN_PROMO_BONUS
+                break  # One opportunity is enough for bonus
+    if black_hand_pawns > 0:
+        for c in range(BOARD_SIZE):
+            if gamestate.board[BOARD_SIZE - 2][c] == EMPTY_SQUARE:
+                score -= DROP_PAWN_PROMO_BONUS
+                break
+
+    # 9. Rook on open/semi-open file bonus
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            piece = gamestate.board[r][c]
+            if piece == EMPTY_SQUARE:
+                continue
+            if piece.upper() != 'R':
+                continue
+            color = get_piece_color(piece)
+            has_friendly_pawn = False
+            has_enemy_pawn = False
+            friendly_pawn = 'P' if color == 'w' else 'p'
+            enemy_pawn = 'p' if color == 'w' else 'P'
+            for scan_r in range(BOARD_SIZE):
+                if gamestate.board[scan_r][c] == friendly_pawn:
+                    has_friendly_pawn = True
+                if gamestate.board[scan_r][c] == enemy_pawn:
+                    has_enemy_pawn = True
+            bonus = 0
+            if not has_friendly_pawn and not has_enemy_pawn:
+                bonus = OPEN_FILE_ROOK_BONUS
+            elif not has_friendly_pawn:
+                bonus = SEMI_OPEN_FILE_ROOK_BONUS
+            if color == 'w':
+                score += bonus
+            else:
+                score -= bonus
 
     return score
 
