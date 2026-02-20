@@ -20,6 +20,7 @@ import time
 import sqlite3
 import hashlib
 import copy
+from datetime import datetime
 from pathlib import Path
 
 # ── Playwright import ───────────────────────────────────────
@@ -1015,22 +1016,39 @@ def _would_create_move_cycle(our_move_history, candidate_move):
 
 
 def get_ai_move(gamestate, our_color, our_move_history=None):
-    """Get the best move from cache or AI engine, avoiding move cycles."""
+    """Get the best move from cache or AI engine, avoiding move cycles.
+    
+    Returns: (move, move_info) where move_info is a dict with:
+        source: 'cache'|'search'|'alt_search'|'fallback_nocycle'|'random'
+        score: evaluation score (None if unknown)
+        depth: search depth used
+        legal_moves_count: number of legal moves
+        eval_before: position evaluation before making the move
+    """
     gamestate.current_turn = our_color
     gamestate._all_legal_moves_cache = None
     
     legal_moves = gamestate.get_all_legal_moves()
     if not legal_moves:
         print("   ❌ No legal moves!")
-        return None
+        return None, {'source': 'none', 'score': None, 'depth': 0, 'legal_moves_count': 0, 'eval_before': None}
     
     print(f"   🧠 {len(legal_moves)} legal moves available")
     
     pos_hash = get_position_hash(gamestate)
     print(f"   🔑 Position hash: {pos_hash[:16]}...")
     
+    # Evaluate position before move for logging
+    eval_before = None
+    try:
+        eval_before = evaluate_position(gamestate)
+    except Exception:
+        pass
+    
     if our_move_history is None:
         our_move_history = []
+    
+    base_info = {'legal_moves_count': len(legal_moves), 'eval_before': eval_before}
     
     def _would_cycle(move):
         """Check if this move would create a cycle in our recent move sequence."""
@@ -1051,7 +1069,7 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
                         print(f"   🔄 CACHE HIT depth {depth}: {format_move_for_print(best_move)} — SKIPPED (cycle)")
                         continue
                     print(f"   ✅ CACHE HIT at depth {depth}: {format_move_for_print(best_move)}")
-                    return best_move
+                    return best_move, {**base_info, 'source': 'cache', 'score': None, 'depth': depth}
             except Exception:
                 pass
     
@@ -1067,24 +1085,24 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
                         for alt_move, alt_score in top_moves:
                             if not _would_create_move_cycle(our_move_history, alt_move)[0]:
                                 print(f"   🤖 AI alternative: {format_move_for_print(alt_move)} (score: {alt_score:.0f})")
-                                return alt_move
+                                return alt_move, {**base_info, 'source': 'alt_search', 'score': alt_score, 'depth': 4}
                 except Exception:
                     pass
                 # Pick any legal move that doesn't create a cycle
                 for m in legal_moves:
                     if not _would_create_move_cycle(our_move_history, m)[0]:
                         print(f"   🎯 Fallback non-cycling: {format_move_for_print(m)}")
-                        return m
+                        return m, {**base_info, 'source': 'fallback_nocycle', 'score': None, 'depth': 0}
                 print(f"   ⚠️  All moves create cycles, playing AI choice anyway")
             print(f"   🤖 AI move: {format_move_for_print(best_move)}")
-            return best_move
+            return best_move, {**base_info, 'source': 'search', 'score': None, 'depth': 6}
     except Exception as e:
         print(f"   ⚠️  AI error: {e}")
     
     # Fallback: random legal move
     move = random.choice(legal_moves)
     print(f"   🎲 Random fallback: {format_move_for_print(move)}")
-    return move
+    return move, {**base_info, 'source': 'random', 'score': None, 'depth': 0}
 
 
 # ── Game Loop ───────────────────────────────────────────────
@@ -1140,11 +1158,43 @@ def dismiss_game_over(page):
     return False
 
 
+def _board_to_list(gs):
+    """Convert board state to serializable list for logging."""
+    board = []
+    for row in range(len(gs.board)):
+        board.append(list(gs.board[row]))
+    return board
+
+
+def _save_loss_log(game_log, our_color, result_text, moves_made):
+    """Save detailed game log to game_logs/ directory for lost games."""
+    log_dir = Path(__file__).parent / "game_logs"
+    log_dir.mkdir(exist_ok=True)
+    
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"loss_{ts}_{our_color}_{moves_made}moves.json"
+    filepath = log_dir / filename
+    
+    data = {
+        'timestamp': datetime.now().isoformat(),
+        'our_color': our_color,
+        'result': result_text,
+        'total_moves': moves_made,
+        'moves': game_log,
+    }
+    
+    with open(filepath, 'w') as f:
+        json.dump(data, f, indent=2, default=str)
+    
+    print(f"   📝 Loss log saved: {filepath}")
+
+
 def play_game(page):
     """Main game loop — read board, decide move, play it."""
     our_color = detect_our_color(page)
     moves_made = 0
     our_move_history = []   # list of our moves in order, for cycle detection
+    game_log = []           # detailed per-move log for loss analysis
     
     print(f"\n{'═' * 50}")
     print(f"♟️  GAME STARTED! We are {'WHITE ♙' if our_color == 'w' else 'BLACK ♟'}")
@@ -1177,11 +1227,27 @@ def play_game(page):
         print_board(gs)
         
         # Get AI move
-        best_move = get_ai_move(gs, our_color, our_move_history=our_move_history)
+        best_move, move_info = get_ai_move(gs, our_color, our_move_history=our_move_history)
         if not best_move:
             print("   ❌ No move found!")
             time.sleep(2)
             continue
+        
+        # Log move details (board state, hands, evaluation, chosen move)
+        move_entry = {
+            'move_num': moves_made + 1,
+            'board': _board_to_list(gs),
+            'hands': {c: {k: v for k, v in h.items() if v > 0} for c, h in gs.hands.items()},
+            'eval_before': move_info.get('eval_before'),
+            'chosen_move': repr(best_move),
+            'chosen_move_readable': format_move_for_print(best_move),
+            'source': move_info.get('source'),
+            'search_depth': move_info.get('depth'),
+            'score': move_info.get('score'),
+            'legal_moves_count': move_info.get('legal_moves_count'),
+            'dom_plies': dom_moves,
+        }
+        game_log.append(move_entry)
         
         # Re-check game state after AI computation (game may have ended while thinking)
         if not is_game_active(page):
@@ -1272,6 +1338,19 @@ def play_game(page):
     print(f"🏁 Game over after {moves_made} moves! Result: {result_text}")
     print(f"{'═' * 50}")
     _screenshot(page, "game_over")
+    
+    # Save detailed log for lost games
+    result_lower = result_text.lower()
+    is_loss = ('lost' in result_lower or 'resign' in result_lower or 'timeout' in result_lower 
+               or ('won' in result_lower and 'you' not in result_lower)
+               or ('checkmate' in result_lower and 'you' not in result_lower))
+    # Extra check: "won" without context could be opponent winning
+    if 'won' in result_lower and 'you won' not in result_lower:
+        is_loss = True
+    if is_loss or ('unknown' in result_lower and moves_made > 0):
+        _save_loss_log(game_log, our_color, result_text, moves_made)
+    else:
+        print(f"   ✅ Win/draw — no detailed log saved")
     
     # Save accumulated cache to local DB
     try:

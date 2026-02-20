@@ -8,6 +8,8 @@ training_progress.txt
 .chess_com_profile/
 .chess_com_chrome_state.json
 .bot_screenshots/
+game_logs/
+.stop_after_game
 
 # Database backups
 move_cache.db.backup
