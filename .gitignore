@@ -1,1 +1,27 @@
+# Training
 training_log.txt
+training.pid
+training.health
+training_progress.txt
+
+# Bot runtime
+.chess_com_profile/
+.chess_com_chrome_state.json
+.bot_screenshots/
+
+# Database backups
+move_cache.db.backup
+move_cache.db.bak_*
+move_cache.db.old
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
