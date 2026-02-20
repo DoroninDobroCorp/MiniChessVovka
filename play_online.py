@@ -634,7 +634,7 @@ def read_board_from_dom(page):
             if (px < 0 || hasScale) {
                 result.bankPieces.push({piece: pieceType, color: color, py: py});
             } else {
-                result.boardPieces.push({piece: pieceType, color: color, px: Math.round(px), py: Math.round(py)});
+                result.boardPieces.push({piece: pieceType, color: color, px: px, py: py});
             }
         });
         
@@ -642,7 +642,7 @@ def read_board_from_dom(page):
         const sq = document.querySelector('.TheBoard-squares .square');
         if (sq) {
             const r = sq.getBoundingClientRect();
-            result.squarePx = Math.round(r.width);
+            result.squarePx = r.width;
         }
         
         return result;
@@ -667,8 +667,8 @@ def read_board_from_dom(page):
     
     # Place board pieces
     for p_info in board_data['boardPieces']:
-        grid_col = p_info['px'] // sq_px
-        grid_row = p_info['py'] // sq_px
+        grid_col = round(p_info['px'] / sq_px)
+        grid_row = round(p_info['py'] / sq_px)
         
         # Skip if outside playable area
         if grid_col < GRID_OFFSET or grid_col > BOARD_SIZE or grid_row < GRID_OFFSET or grid_row > BOARD_SIZE:
@@ -1075,12 +1075,12 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
     
     print("   📊 No cache hit, running AI search...")
     try:
-        best_move = find_best_move(gamestate, depth=6, time_limit=45)
+        best_move = find_best_move(gamestate, depth=6, time_limit=None)
         if best_move:
             if _would_cycle(best_move):
                 print(f"   🔄 AI move {format_move_for_print(best_move)} creates cycle, finding alternative...")
                 try:
-                    top_moves = find_best_move(gamestate, depth=4, return_top_n=5, time_limit=15)
+                    top_moves = find_best_move(gamestate, depth=4, return_top_n=5, time_limit=None)
                     if isinstance(top_moves, list):
                         for alt_move, alt_score in top_moves:
                             if not _would_create_move_cycle(our_move_history, alt_move)[0]:
@@ -1254,8 +1254,11 @@ def play_game(page):
             print("   ⚠️  Game ended while computing, breaking...")
             break
         
-        # Add human-like delay before making the move
-        think_delay = random.uniform(1.0, 2.5)
+        # Add human-like delay before making the move (shorter for first moves)
+        if moves_made < 2:
+            think_delay = random.uniform(0.3, 0.8)
+        else:
+            think_delay = random.uniform(1.0, 2.5)
         print(f"   ⏱️  Waiting {think_delay:.1f}s...")
         time.sleep(think_delay)
         
@@ -1341,12 +1344,14 @@ def play_game(page):
     
     # Save detailed log for lost games
     result_lower = result_text.lower()
-    is_loss = ('lost' in result_lower or 'resign' in result_lower or 'timeout' in result_lower 
-               or ('won' in result_lower and 'you' not in result_lower)
-               or ('checkmate' in result_lower and 'you' not in result_lower))
-    # Extra check: "won" without context could be opponent winning
-    if 'won' in result_lower and 'you won' not in result_lower:
-        is_loss = True
+    is_win = 'you won' in result_lower
+    is_draw = 'draw' in result_lower or 'stalemate' in result_lower
+    is_loss = (not is_win and not is_draw and 
+               ('lost' in result_lower or 'you lost' in result_lower
+                or 'timeout' in result_lower
+                or 'won' in result_lower  # opponent won
+                or 'checkmate' in result_lower
+                or 'resign' in result_lower))
     if is_loss or ('unknown' in result_lower and moves_made > 0):
         _save_loss_log(game_log, our_color, result_text, moves_made)
     else:
