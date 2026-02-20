@@ -783,11 +783,30 @@ def detect_turn(page):
 def is_game_active(page):
     """Check if a game is currently in progress on the variants site."""
     return page.evaluate("""() => {
-        // Check for game-over buttons (Play, Rematch, Exit)
+        // Check for game-over buttons (Play, Rematch, Exit, New Game)
         const btns = document.querySelectorAll('button');
         for (const b of btns) {
-            const t = (b.innerText || '').trim();
-            if ((t === 'Rematch' || t === 'Exit') && b.offsetParent !== null) return false;
+            const t = (b.innerText || '').trim().toLowerCase();
+            if ((t === 'rematch' || t === 'exit' || t === 'new game' || t === 'play again') && b.offsetParent !== null) return false;
+        }
+        
+        // Check for game-result overlay or banner (e.g. "You Won", "Draw", etc.)
+        const resultEls = document.querySelectorAll('.game-result, .game-over-header, [class*=gameResult], [class*=game-result], [class*=GameOver]');
+        if (resultEls.length > 0) {
+            for (const el of resultEls) {
+                if (el.offsetParent !== null || el.offsetHeight > 0) return false;
+            }
+        }
+        
+        // Check for result text in common containers
+        const allText = document.body.innerText || '';
+        const resultPatterns = ['wins by checkmate', 'wins by resignation', 'drawn by', 'game over', 'won the game'];
+        for (const pat of resultPatterns) {
+            // Only match if it's in a visible overlay/modal, not in move history
+            const modals = document.querySelectorAll('.modal-content, .game-over, [class*=modal], [class*=overlay]');
+            for (const m of modals) {
+                if (m.offsetParent !== null && (m.innerText || '').toLowerCase().includes(pat)) return false;
+            }
         }
         
         // Must have pieces on the board (non-wall)
@@ -969,8 +988,20 @@ def handle_promotion(page, promotion_piece, to_grid_col, to_grid_row):
 
 # ── AI Decision ─────────────────────────────────────────────
 
-def get_ai_move(gamestate, our_color):
-    """Get the best move from cache or AI engine."""
+def _would_repeat(gamestate, move, position_history):
+    """Check if making this move would lead to a position we've seen 2+ times already."""
+    import copy
+    gs_copy = copy.deepcopy(gamestate)
+    try:
+        gs_copy.make_move(move, is_check_game_over=False)
+        future_hash = get_position_hash(gs_copy)
+        return position_history.get(future_hash, 0) >= 2
+    except Exception:
+        return False
+
+
+def get_ai_move(gamestate, our_color, position_history=None, moves_from_pos=None):
+    """Get the best move from cache or AI engine, avoiding threefold repetition."""
     gamestate.current_turn = our_color
     gamestate._all_legal_moves_cache = None
     
@@ -981,11 +1012,30 @@ def get_ai_move(gamestate, our_color):
     
     print(f"   🧠 {len(legal_moves)} legal moves available")
     
-    # Try cache first
     pos_hash = get_position_hash(gamestate)
     print(f"   🔑 Position hash: {pos_hash[:16]}...")
     
-    # Check cache at various depths
+    # Repetition avoidance — ALWAYS active
+    pos_count = position_history.get(pos_hash, 0) if position_history else 0
+    played_before = moves_from_pos.get(pos_hash, set()) if moves_from_pos else set()
+    has_history = bool(position_history)
+    
+    if pos_count >= 2:
+        print(f"   🔄 Position seen {pos_count}x! Avoiding: {[format_move_for_print(m) for m in played_before]}")
+    
+    def _is_repetition_move(move):
+        """Check if move should be avoided due to repetition risk."""
+        if not has_history:
+            return False
+        # Layer 1: never replay the same move from a position we've seen 2+ times
+        if pos_count >= 2 and repr(move) in {repr(m) for m in played_before}:
+            return True
+        # Layer 2: ALWAYS avoid moves leading to positions already seen 2+ times
+        if _would_repeat(gamestate, move, position_history):
+            return True
+        return False
+    
+    # Try cache first
     for depth in [6, 5, 4, 3]:
         cache_key = (pos_hash, depth)
         cached = ai_module.move_cache.get(cache_key)
@@ -993,6 +1043,9 @@ def get_ai_move(gamestate, our_color):
             try:
                 best_move = eval(cached)
                 if best_move in legal_moves:
+                    if _is_repetition_move(best_move):
+                        print(f"   🔄 CACHE HIT at depth {depth}: {format_move_for_print(best_move)} — SKIPPED (repetition risk)")
+                        continue
                     print(f"   ✅ CACHE HIT at depth {depth}: {format_move_for_print(best_move)}")
                     return best_move
             except Exception:
@@ -1000,8 +1053,25 @@ def get_ai_move(gamestate, our_color):
     
     print("   📊 No cache hit, running AI search...")
     try:
-        best_move = find_best_move(gamestate, depth=6)
+        best_move = find_best_move(gamestate, depth=6, time_limit=45)
         if best_move:
+            if _is_repetition_move(best_move):
+                print(f"   🔄 AI move {format_move_for_print(best_move)} risks repetition, finding alternative...")
+                try:
+                    top_moves = find_best_move(gamestate, depth=4, return_top_n=5, time_limit=15)
+                    if isinstance(top_moves, list):
+                        for alt_move, alt_score in top_moves:
+                            if not _is_repetition_move(alt_move):
+                                print(f"   🤖 AI alternative: {format_move_for_print(alt_move)} (score: {alt_score:.0f})")
+                                return alt_move
+                except Exception:
+                    pass
+                # All alternatives also repeat — pick any legal move we haven't played
+                for m in legal_moves:
+                    if repr(m) not in {repr(p) for p in played_before}:
+                        print(f"   🎯 Fallback non-repeating move: {format_move_for_print(m)}")
+                        return m
+                print(f"   ⚠️  No non-repeating move possible, playing AI choice")
             print(f"   🤖 AI move: {format_move_for_print(best_move)}")
             return best_move
     except Exception as e:
@@ -1070,6 +1140,8 @@ def play_game(page):
     """Main game loop — read board, decide move, play it."""
     our_color = detect_our_color(page)
     moves_made = 0
+    position_history = {}   # hash → count, to detect repetition
+    moves_from_pos = {}     # hash → set of moves already played from this position
     
     print(f"\n{'═' * 50}")
     print(f"♟️  GAME STARTED! We are {'WHITE ♙' if our_color == 'w' else 'BLACK ♟'}")
@@ -1097,16 +1169,27 @@ def play_game(page):
         
         gs.current_turn = our_color
         
+        # Track position for threefold repetition avoidance
+        pos_hash = get_position_hash(gs)
+        position_history[pos_hash] = position_history.get(pos_hash, 0) + 1
+        if position_history[pos_hash] >= 2:
+            print(f"   ⚠️  Position seen {position_history[pos_hash]}x — will avoid repetition")
+        
         print(f"\n{'─' * 40}")
         print(f"📍 Move #{moves_made + 1} ({'WHITE' if our_color == 'w' else 'BLACK'}) [DOM plies: {dom_moves}]")
         print_board(gs)
         
         # Get AI move
-        best_move = get_ai_move(gs, our_color)
+        best_move = get_ai_move(gs, our_color, position_history=position_history, moves_from_pos=moves_from_pos)
         if not best_move:
             print("   ❌ No move found!")
             time.sleep(2)
             continue
+        
+        # Re-check game state after AI computation (game may have ended while thinking)
+        if not is_game_active(page):
+            print("   ⚠️  Game ended while computing, breaking...")
+            break
         
         # Add human-like delay before making the move
         think_delay = random.uniform(1.0, 2.5)
@@ -1145,6 +1228,22 @@ def play_game(page):
             continue
         
         moves_made += 1
+        
+        # Record played move for repetition avoidance
+        if pos_hash not in moves_from_pos:
+            moves_from_pos[pos_hash] = set()
+        moves_from_pos[pos_hash].add(best_move)
+        
+        # Track position after our move (opponent's turn) for _would_repeat
+        try:
+            gs_after = read_board_from_dom(page)
+            if gs_after:
+                opp_color = 'b' if our_color == 'w' else 'w'
+                gs_after.current_turn = opp_color
+                after_hash = get_position_hash(gs_after)
+                position_history[after_hash] = position_history.get(after_hash, 0) + 1
+        except Exception:
+            pass
         
         # Wait for opponent's move (or game end)
         print(f"   ⏳ Waiting for opponent...")

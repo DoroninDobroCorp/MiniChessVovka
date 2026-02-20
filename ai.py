@@ -814,7 +814,7 @@ def evaluate_move_worker(args):
 
 
 # --- Main AI Function (Using Iterative Deepening + Cache) ---
-def find_best_move(gamestate: GameState, depth=6, return_top_n=1):
+def find_best_move(gamestate: GameState, depth=6, return_top_n=1, time_limit=None):
     """
     Finds the best move using ITERATIVE DEEPENING with move cache.
     Searches depth 1, 2, 3... up to target depth.
@@ -824,6 +824,7 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1):
         gamestate: Current game state
         depth: Maximum search depth
         return_top_n: If > 1, returns list of (move, score) tuples sorted by score
+        time_limit: Max seconds for search (stops between depth iterations). None = no limit.
     
     Returns:
         If return_top_n == 1: best_move
@@ -946,6 +947,11 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1):
             
             if abs(best_score) >= CHECKMATE_SCORE * 0.9:
                 print(f"  [ID] Mate found at depth {current_depth}, stopping search")
+                break
+            
+            # Time limit check between depth iterations
+            if time_limit and (time.time() - start_time) >= time_limit:
+                print(f"  [ID] Time limit ({time_limit}s) reached after depth {current_depth}, using best so far")
                 break
 
     except Exception as e:
