@@ -1281,6 +1281,12 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False, tt
             asp_alpha = baseline_score - ASPIRATION_WINDOW
             asp_beta = baseline_score + ASPIRATION_WINDOW
             
+            # Collect TT entries from all workers
+            all_worker_tt = {}
+            # Merge first worker's TT
+            if first_result and len(first_result) >= 3 and first_result[2]:
+                all_worker_tt.update(first_result[2])
+            
             # Search remaining moves in parallel with tighter window
             for move in legal_moves[1:]:
                 future = executor.submit(_minimax_worker, move, gamestate_dump, depth, asp_alpha, asp_beta, maximizing_player, None, tt_dump)
@@ -1292,7 +1298,13 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False, tt
                 try:
                     res = future.result()
                     if res:
-                        move, score = res
+                        move, score = res[0], res[1]
+                        # Merge worker TT (keep higher depth entries)
+                        if len(res) >= 3 and res[2]:
+                            for h, entry in res[2].items():
+                                existing = all_worker_tt.get(h)
+                                if not existing or entry.get('depth', 0) > existing.get('depth', 0):
+                                    all_worker_tt[h] = entry
                         # If score is at window boundary, it may be truncated — re-search with full window
                         if score is not None and (score <= asp_alpha or score >= asp_beta):
                             re_search_moves.append(move)
@@ -1306,14 +1318,27 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False, tt
                 try:
                     res = _minimax_worker(move, gamestate_dump, depth, -float('inf'), float('inf'), maximizing_player, None, tt_dump)
                     if res:
+                        if len(res) >= 3 and res[2]:
+                            for h, entry in res[2].items():
+                                existing = all_worker_tt.get(h)
+                                if not existing or entry.get('depth', 0) > existing.get('depth', 0):
+                                    all_worker_tt[h] = entry
                         results.append(res)
                 except Exception as e:
                     print(f"Re-search failed for {move}: {e}")
+            
+            # Merge worker TT entries into main TT for persistence
+            for h, entry in all_worker_tt.items():
+                existing = tt.get(h)
+                if not existing or entry.get('depth', 0) > existing.get('depth', 0):
+                    tt[h] = entry
+            if all_worker_tt:
+                print(f"  [TT MERGE] Collected {len(all_worker_tt)} TT entries from workers")
 
         all_results = []
         for result in results:
             if result is None: continue
-            move, score = result
+            move, score = result[0], result[1]
             if score is not None:
                 all_results.append((move, score))
 
@@ -1380,7 +1405,8 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False, tt
              return result
 
 def _minimax_worker(move, gamestate_dump, depth, alpha, beta, maximizing_player, move_cache, tt_dump=None):
-    """Minimax function for a single move, executed by a worker process."""
+    """Minimax function for a single move, executed by a worker process.
+    Returns (move, score, valuable_tt) where valuable_tt has high-depth TT entries."""
     try:
         # Initialize worker's TT from snapshot (if available)
         global tt
@@ -1389,35 +1415,32 @@ def _minimax_worker(move, gamestate_dump, depth, alpha, beta, maximizing_player,
                 tt = pickle.loads(tt_dump)
             except:
                 tt = {}
+        else:
+            tt = {}
         
         # Deserialize inside the worker
         gamestate_copy = pickle.loads(gamestate_dump)
         
         # Make the move for which this worker is responsible using optimized method
-        # Note: make_ai_move handles promotion if it's in the move tuple
         gamestate_copy.make_ai_move(move)
 
-        # --- NO CACHE CHECK HERE - Cache check is done inside recursive calls --- 
-        # current_hash = get_position_hash(gamestate_copy)
-        # ... cache check logic removed ...
-
         # Call the recursive helper starting from the state AFTER the move
-        # The next level alternates the player
         score = _minimax_recursive(gamestate_copy, depth - 1, alpha, beta, not maximizing_player)
 
-        # --- NO CACHE STORE HERE - Cache is managed by main process --- 
-        # gamestate_copy.undo_move() # Backtrack is done implicitly by returning
-
-        # The score returned by _minimax_recursive is the evaluation of the position
-        # from the perspective of the player who just moved (the maximizing_player here).
-        return move, score
+        # Collect valuable TT entries (depth >= 3) to return to main process
+        min_tt_depth = max(1, depth - 3)
+        valuable_tt = {}
+        for h, entry in tt.items():
+            if entry.get('depth', 0) >= min_tt_depth and entry.get('best_move'):
+                valuable_tt[h] = entry
+        
+        return move, score, valuable_tt
     except Exception as e:
-        # ... (existing error handling) ...
         try: move_str = format_move_for_print(move)
         except: move_str = str(move)
         print(f"Error in worker process for move {move_str}: {type(e).__name__} - {e}")
-        error_score = -CHECKMATE_SCORE if maximizing_player else CHECKMATE_SCORE # Assign worst score
-        return move, error_score
+        error_score = -CHECKMATE_SCORE if maximizing_player else CHECKMATE_SCORE
+        return move, error_score, {}
 
 def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_player, allow_null=True):
     """Recursive helper for minimax with alpha-beta pruning, null-move pruning, LMR, check extensions, TT."""
