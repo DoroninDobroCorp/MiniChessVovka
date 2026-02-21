@@ -909,16 +909,19 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
             noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
-            # Late Move Reduction: reduce depth for late quiet moves
-            if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT 
-                    and not noisy):
-                # Reduced search
-                eval_score, _ = minimax_alpha_beta(gamestate, depth - 2, alpha, beta, False)
-                # Re-search at full depth if score improves
-                if eval_score > alpha:
-                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, False)
-            else:
+            if i == 0:
+                # PVS: first move — full window
                 eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, False)
+            else:
+                # LMR + PVS
+                if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT 
+                        and not noisy):
+                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 2, alpha, alpha + 1, False)
+                else:
+                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, alpha + 1, False)
+                # Re-search with full window if improved alpha
+                if alpha < eval_score < beta:
+                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, False)
             
             gamestate.undo_ai_move()
 
@@ -944,14 +947,17 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
             noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
-            # Late Move Reduction
-            if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
-                    and not noisy):
-                eval_score, _ = minimax_alpha_beta(gamestate, depth - 2, alpha, beta, True)
-                if eval_score < beta:
-                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, True)
-            else:
+            if i == 0:
                 eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, True)
+            else:
+                # LMR + PVS
+                if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
+                        and not noisy):
+                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 2, beta - 1, beta, True)
+                else:
+                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, beta - 1, beta, True)
+                if alpha < eval_score < beta:
+                    eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, True)
             
             gamestate.undo_ai_move()
 
@@ -1259,8 +1265,14 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False, tt
         num_workers = NUM_WORKERS if NUM_WORKERS else multiprocessing.cpu_count()
         print(f"Using {num_workers} worker processes for depth {depth} search.")
         
-        # Serialize TT snapshot for workers (if available)
-        tt_dump = pickle.dumps(tt_data) if tt_data else None
+        # Serialize TT snapshot for workers — only high-value entries to limit overhead
+        if tt_data:
+            # Filter: only entries with depth >= search_depth - 3 (useful for move ordering)
+            min_useful_depth = max(1, depth - 3)
+            filtered_tt = {h: e for h, e in tt_data.items() if e.get('depth', 0) >= min_useful_depth}
+            tt_dump = pickle.dumps(filtered_tt)
+        else:
+            tt_dump = None
         
         # Use ProcessPoolExecutor for better cleanup
         with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
@@ -1513,7 +1525,7 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
     orig_alpha = alpha
     best_move_here = legal_moves[0] if legal_moves else None
 
-    # --- Move Iteration with Mate Priority, LMR, and Check Extensions ---
+    # --- Move Iteration with PVS, LMR, and Check Extensions ---
     if maximizing_player:
         max_eval = -float('inf')
         for i, move in enumerate(legal_moves):
@@ -1523,14 +1535,22 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
             # Check if this move gives check (don't reduce checking moves)
             gives_check = gamestate.is_in_check(gamestate.current_turn)
             
-            # Late Move Reduction — skip for noisy or checking moves
-            if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
-                    and not noisy and not gives_check):
-                eval_score = _minimax_recursive(gamestate, depth - 2, alpha, beta, False)
-                if eval_score > alpha:
-                    eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False)
-            else:
+            if i == 0:
+                # PVS: first move (expected best) — full window
                 eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False)
+            else:
+                # LMR + PVS: zero window first, re-search if needed
+                if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
+                        and not noisy and not gives_check):
+                    # LMR: reduced depth, zero window
+                    eval_score = _minimax_recursive(gamestate, depth - 2, alpha, alpha + 1, False)
+                else:
+                    # PVS: zero window
+                    eval_score = _minimax_recursive(gamestate, depth - 1, alpha, alpha + 1, False)
+                
+                # Re-search with full window if score improved alpha
+                if alpha < eval_score < beta:
+                    eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False)
             
             gamestate.undo_ai_move()
 
@@ -1563,14 +1583,20 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
             
             gives_check = gamestate.is_in_check(gamestate.current_turn)
             
-            # Late Move Reduction — skip for noisy or checking moves
-            if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
-                    and not noisy and not gives_check):
-                eval_score = _minimax_recursive(gamestate, depth - 2, alpha, beta, True)
-                if eval_score < beta:
-                    eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True)
-            else:
+            if i == 0:
+                # PVS: first move — full window
                 eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True)
+            else:
+                # LMR + PVS: zero window first
+                if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
+                        and not noisy and not gives_check):
+                    eval_score = _minimax_recursive(gamestate, depth - 2, beta - 1, beta, True)
+                else:
+                    eval_score = _minimax_recursive(gamestate, depth - 1, beta - 1, beta, True)
+                
+                # Re-search with full window if score improved beta
+                if alpha < eval_score < beta:
+                    eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True)
             
             gamestate.undo_ai_move()
 
