@@ -1082,8 +1082,13 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
             print(f"   🔄 Move {format_move_for_print(move)} would create cycle of length {k} — avoiding")
         return would
     
-    # Try cache first
+    # Try cache first — but skip shallow depths if many pieces in hand (complex tactics)
+    total_hand_pieces = sum(gamestate.hands.get('w', {}).values()) + sum(gamestate.hands.get('b', {}).values())
+    min_cache_depth = 5 if total_hand_pieces >= 2 else 4  # Need deeper search with drops available
+    
     for depth in [6, 5, 4, 3]:
+        if depth < min_cache_depth:
+            continue  # Skip shallow cache in tactical positions
         cache_key = (pos_hash, depth)
         cached = ai_module.move_cache.get(cache_key)
         if cached:
