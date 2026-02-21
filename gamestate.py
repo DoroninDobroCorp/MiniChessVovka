@@ -32,7 +32,7 @@ class GameState:
         # По умолчанию: оба игрока - люди (AI можно включить через кнопки в GUI)
         self.white_ai_enabled = False  # По умолчанию: игрок играет за белых
         self.black_ai_enabled = False  # По умолчанию: игрок играет за черных (включи AI кнопкой!)
-        self.ai_depth = 6  # Match trained cache depth (758 entries at depth 5-6)
+        self.ai_depth = 6  # Balanced depth for speed vs quality
         self.show_hint = False # Note: show_hint itself is global in main.py
         self._all_legal_moves_cache = None
         self._is_check_cache = None

@@ -56,6 +56,18 @@ BLOCKED_PAWN_PENALTY = 25
 # Bonus for having pawns in hand that could be dropped near promotion
 DROP_PAWN_PROMO_BONUS = 250
 
+# --- Zobrist Hashing Tables (much faster than SHA256) ---
+_zobrist_rng = random.Random(0xDEADBEEF)
+ZOBRIST_PIECE_SQUARE = {}
+for _zpc in 'PNBRQKpnbrqk':
+    ZOBRIST_PIECE_SQUARE[_zpc] = [[_zobrist_rng.getrandbits(64) for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+ZOBRIST_TURN_BLACK = _zobrist_rng.getrandbits(64)
+ZOBRIST_HAND = {}
+for _zcol in ('w', 'b'):
+    for _zpt in 'PNBRQ':
+        ZOBRIST_HAND[(_zcol, _zpt)] = [_zobrist_rng.getrandbits(64) for _ in range(8)]
+ZOBRIST_PROMOTED = [[_zobrist_rng.getrandbits(64) for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+
 # --- Transposition Table (Now a simple Move Cache) ---
 # Stores: {(position_hash, depth): best_move_repr} - includes depth to avoid shallow cached moves
 move_cache = {}
@@ -208,45 +220,31 @@ except ImportError:
 # Using helpers imported from utils: get_piece_color, get_opposite_color
 
 def get_position_hash(gamestate: GameState):
-    """Generates a unique and STABLE hash for the current game state including hands and turn.
-
-       Handles potential missing attributes gracefully.
-       Uses SHA256 for stability across runs.
-    """
+    """Fast Zobrist hash for game state. Returns string for cache/DB compatibility."""
     try:
-        board_tuple = tuple(''.join(row) for row in gamestate.board)
-        # Hands are explicitly sorted for consistency
-        white_hand_tuple = tuple(sorted(gamestate.hands.get('w', {}).items()))
-        black_hand_tuple = tuple(sorted(gamestate.hands.get('b', {}).items()))
-        turn = gamestate.current_turn
-        # Use getattr for attributes that might be missing in some states/copies
-        # Ensure consistent defaults (e.g., None or specific string)
-        en_passant = getattr(gamestate, 'en_passant_target', None)
-        # Castling rights format needs to be consistent
-        castling_w_k = getattr(gamestate, 'can_castle_white_kingside', False)
-        castling_w_q = getattr(gamestate, 'can_castle_white_queenside', False)
-        castling_b_k = getattr(gamestate, 'can_castle_black_kingside', False)
-        castling_b_q = getattr(gamestate, 'can_castle_black_queenside', False)
-        castling = (castling_w_k, castling_w_q, castling_b_k, castling_b_q)
-
-        # Combine all relevant state information into a tuple
-        promoted = tuple(sorted(getattr(gamestate, 'promoted_pieces', set())))
-        state_tuple = (board_tuple, white_hand_tuple, black_hand_tuple, turn, en_passant, castling, promoted)
-
-        # Convert tuple to a string representation for hashing
-        # Using repr() is generally safe and stable for tuples of primitives/basic types
-        state_string = repr(state_tuple)
-
-        # Calculate SHA256 hash
-        hasher = hashlib.sha256()
-        hasher.update(state_string.encode('utf-8')) # Hash the UTF-8 encoded string
-        stable_hash = hasher.hexdigest() # Get the hex representation of the hash
-
-        return stable_hash
+        h = 0
+        board = gamestate.board
+        for r in range(BOARD_SIZE):
+            row = board[r]
+            for c in range(BOARD_SIZE):
+                piece = row[c]
+                if piece != EMPTY_SQUARE:
+                    h ^= ZOBRIST_PIECE_SQUARE[piece][r][c]
+        if gamestate.current_turn == 'b':
+            h ^= ZOBRIST_TURN_BLACK
+        hands = gamestate.hands
+        for color in ('w', 'b'):
+            hand = hands.get(color, {})
+            for pt in 'PNBRQ':
+                count = hand.get(pt, 0)
+                if count > 0:
+                    h ^= ZOBRIST_HAND[(color, pt)][min(count, 7)]
+        for (r, c) in getattr(gamestate, 'promoted_pieces', set()):
+            h ^= ZOBRIST_PROMOTED[r][c]
+        return str(h)
     except Exception as e:
         print(f"[ERROR] Failed to generate hash: {e}")
-        traceback.print_exc() # <--- Теперь traceback определен
-        # Return a default or error hash to avoid crashing, though moves won't cache
+        traceback.print_exc()
         return "error_hash"
 
 

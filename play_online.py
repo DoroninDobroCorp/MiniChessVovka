@@ -1082,40 +1082,35 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
             print(f"   🔄 Move {format_move_for_print(move)} would create cycle of length {k} — avoiding")
         return would
     
-    # Try cache first — but skip shallow depths if many pieces in hand (complex tactics)
-    total_hand_pieces = sum(gamestate.hands.get('w', {}).values()) + sum(gamestate.hands.get('b', {}).values())
-    min_cache_depth = 5 if total_hand_pieces >= 2 else 4  # Need deeper search with drops available
-    
-    for depth in [6, 5, 4, 3]:
-        if depth < min_cache_depth:
-            continue  # Skip shallow cache in tactical positions
-        cache_key = (pos_hash, depth)
-        cached = ai_module.move_cache.get(cache_key)
-        if cached:
-            try:
-                best_move = eval(cached)
-                if best_move in legal_moves:
-                    if _would_cycle(best_move):
-                        print(f"   🔄 CACHE HIT depth {depth}: {format_move_for_print(best_move)} — SKIPPED (cycle)")
-                        continue
-                    print(f"   ✅ CACHE HIT at depth {depth}: {format_move_for_print(best_move)}")
-                    return best_move, {**base_info, 'source': 'cache', 'score': None, 'depth': depth}
-            except Exception:
-                pass
+    # Try cache — use configured depth for actual moves
+    search_depth = gamestate.ai_depth if hasattr(gamestate, 'ai_depth') else 6
+    cache_key = (pos_hash, search_depth)
+    cached = ai_module.move_cache.get(cache_key)
+    if cached:
+        try:
+            best_move = eval(cached)
+            if best_move in legal_moves:
+                if _would_cycle(best_move):
+                    print(f"   🔄 CACHE HIT depth {search_depth}: {format_move_for_print(best_move)} — SKIPPED (cycle)")
+                else:
+                    print(f"   ✅ CACHE HIT at depth {search_depth}: {format_move_for_print(best_move)}")
+                    return best_move, {**base_info, 'source': 'cache', 'score': None, 'depth': search_depth}
+        except Exception:
+            pass
     
     print("   📊 No cache hit, running AI search...")
     try:
-        best_move = find_best_move(gamestate, depth=6, time_limit=None)
+        best_move = find_best_move(gamestate, depth=search_depth, time_limit=30)
         if best_move:
             if _would_cycle(best_move):
                 print(f"   🔄 AI move {format_move_for_print(best_move)} creates cycle, finding alternative...")
                 try:
-                    top_moves = find_best_move(gamestate, depth=4, return_top_n=5, time_limit=None)
+                    top_moves = find_best_move(gamestate, depth=max(4, search_depth - 2), return_top_n=5, time_limit=15)
                     if isinstance(top_moves, list):
                         for alt_move, alt_score in top_moves:
                             if not _would_create_move_cycle(our_move_history, alt_move)[0]:
                                 print(f"   🤖 AI alternative: {format_move_for_print(alt_move)} (score: {alt_score:.0f})")
-                                return alt_move, {**base_info, 'source': 'alt_search', 'score': alt_score, 'depth': 4}
+                                return alt_move, {**base_info, 'source': 'alt_search', 'score': alt_score, 'depth': max(4, search_depth - 2)}
                 except Exception:
                     pass
                 # Pick any legal move that doesn't create a cycle
@@ -1125,7 +1120,7 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
                         return m, {**base_info, 'source': 'fallback_nocycle', 'score': None, 'depth': 0}
                 print(f"   ⚠️  All moves create cycles, playing AI choice anyway")
             print(f"   🤖 AI move: {format_move_for_print(best_move)}")
-            return best_move, {**base_info, 'source': 'search', 'score': None, 'depth': 6}
+            return best_move, {**base_info, 'source': 'search', 'score': None, 'depth': search_depth}
     except Exception as e:
         print(f"   ⚠️  AI error: {e}")
     
@@ -1196,19 +1191,21 @@ def _board_to_list(gs):
     return board
 
 
-def _save_loss_log(game_log, our_color, result_text, moves_made):
-    """Save detailed game log to game_logs/ directory for lost games."""
+def _save_game_log(game_log, our_color, result_text, moves_made, result_label):
+    """Save detailed game log to game_logs/ directory for ALL games."""
     log_dir = Path(__file__).parent / "game_logs"
     log_dir.mkdir(exist_ok=True)
     
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"loss_{ts}_{our_color}_{moves_made}moves.json"
+    tag = result_label.lower()  # win/loss/draw
+    filename = f"{tag}_{ts}_{our_color}_{moves_made}moves.json"
     filepath = log_dir / filename
     
     data = {
         'timestamp': datetime.now().isoformat(),
         'our_color': our_color,
         'result': result_text,
+        'result_label': result_label,
         'total_moves': moves_made,
         'moves': game_log,
     }
@@ -1216,7 +1213,7 @@ def _save_loss_log(game_log, our_color, result_text, moves_made):
     with open(filepath, 'w') as f:
         json.dump(data, f, indent=2, default=str)
     
-    print(f"   📝 Loss log saved: {filepath}")
+    print(f"   📝 Game log saved: {filepath}")
 
 
 def play_game(page):
@@ -1407,10 +1404,8 @@ def play_game(page):
     result_label = "WIN" if is_win else ("LOSS" if is_loss else "DRAW")
     print(f"   📊 Result: {result_label}")
     
-    if is_loss or (not is_win and not is_draw and moves_made > 0):
-        _save_loss_log(game_log, our_color, result_text, moves_made)
-    else:
-        print(f"   ✅ {result_label} — no detailed log saved")
+    # Save game log for ALL games (not just losses)
+    _save_game_log(game_log, our_color, result_text, moves_made, result_label)
     
     # Save accumulated cache to local DB
     try:
