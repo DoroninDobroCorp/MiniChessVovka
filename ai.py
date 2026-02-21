@@ -258,7 +258,7 @@ def evaluate_position(gamestate: GameState):
     Returns a score (positive for white advantage, negative for black).
     """
     if gamestate.checkmate:
-        return -float('inf') if gamestate.current_turn == 'w' else float('inf')
+        return -CHECKMATE_SCORE if gamestate.current_turn == 'w' else CHECKMATE_SCORE
     if gamestate.stalemate:
         # --- Stalemate Evaluation based on Material ---
         white_material = 0
@@ -640,8 +640,6 @@ def get_noisy_moves(gamestate: GameState):
 
 def quiescence_search(gamestate: GameState, alpha, beta, depth):
     """ Search only captures and promotions until a quiet position is reached. """
-    if gamestate.checkmate or gamestate.stalemate:
-         return evaluate_position(gamestate)
 
     stand_pat_score = evaluate_position(gamestate)
 
@@ -661,11 +659,15 @@ def quiescence_search(gamestate: GameState, alpha, beta, depth):
         alpha = max(alpha, stand_pat_score)
 
         noisy_moves = get_noisy_moves(gamestate)
-        # Sort noisy moves? MVV-LVA might be good here too.
+        # Terminal state: get_noisy_moves calls get_all_legal_moves internally (cached)
+        if not gamestate.get_all_legal_moves():
+            if gamestate.is_in_check(gamestate.current_turn):
+                return -CHECKMATE_SCORE
+            else:
+                return STALEMATE_SCORE
         noisy_moves.sort(key=lambda m: mvv_lva_score(gamestate, m), reverse=True)
 
         for move in noisy_moves:
-            # Use reversible moves instead of deepcopy for performance
             gamestate.make_ai_move(move)
 
             score = quiescence_search(gamestate, alpha, beta, depth - 1)
@@ -683,10 +685,14 @@ def quiescence_search(gamestate: GameState, alpha, beta, depth):
         beta = min(beta, stand_pat_score)
 
         noisy_moves = get_noisy_moves(gamestate)
+        if not gamestate.get_all_legal_moves():
+            if gamestate.is_in_check(gamestate.current_turn):
+                return CHECKMATE_SCORE
+            else:
+                return STALEMATE_SCORE
         noisy_moves.sort(key=lambda m: mvv_lva_score(gamestate, m), reverse=True)
 
         for move in noisy_moves:
-            # Use reversible moves instead of deepcopy for performance
             gamestate.make_ai_move(move)
 
             score = quiescence_search(gamestate, alpha, beta, depth - 1)
@@ -833,6 +839,12 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
     Does NOT interact with the move cache directly.
     Returns: (score, best_move_found_at_this_node)
     """
+    # --- Check Extension: extend search when in check to avoid horizon effect ---
+    current_color = 'w' if maximizing_player else 'b'
+    in_check = gamestate.is_in_check(current_color)
+    if in_check and depth > 0 and depth < 3:
+        depth += 1
+
     if depth == 0 or gamestate.checkmate or gamestate.stalemate:
         q_score = quiescence_search(gamestate, alpha, beta, MAX_QUIESCENCE_DEPTH)
         return q_score, None
@@ -859,11 +871,10 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
     # --- Null-Move Pruning ---
     # Skip if: in check, depth too shallow, or opponent has pieces in hand (crazyhouse drops are too dangerous)
     NULL_MOVE_R = 2  # Reduction factor
-    current_color = 'w' if maximizing_player else 'b'
     opponent_color = 'b' if maximizing_player else 'w'
     opponent_hand_count = sum(gamestate.hands.get(opponent_color, {}).values())
     if (allow_null and depth >= NULL_MOVE_R + 1 
-            and not gamestate.is_in_check(current_color)
+            and not in_check
             and opponent_hand_count == 0):
         # Make null move (just flip turn)
         gamestate.current_turn = get_opposite_color(gamestate.current_turn)
@@ -909,13 +920,16 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
             noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
+            # Don't reduce checking moves (consistent with worker search)
+            gives_check = gamestate.is_in_check(gamestate.current_turn)
+            
             if i == 0:
                 # PVS: first move — full window
                 eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, False)
             else:
                 # LMR + PVS
                 if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT 
-                        and not noisy):
+                        and not noisy and not gives_check):
                     eval_score, _ = minimax_alpha_beta(gamestate, depth - 2, alpha, alpha + 1, False)
                 else:
                     eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, alpha + 1, False)
@@ -947,12 +961,14 @@ def minimax_alpha_beta(gamestate: GameState, depth, alpha, beta, maximizing_play
             noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
+            gives_check = gamestate.is_in_check(gamestate.current_turn)
+            
             if i == 0:
                 eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, alpha, beta, True)
             else:
                 # LMR + PVS
                 if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
-                        and not noisy):
+                        and not noisy and not gives_check):
                     eval_score, _ = minimax_alpha_beta(gamestate, depth - 2, beta - 1, beta, True)
                 else:
                     eval_score, _ = minimax_alpha_beta(gamestate, depth - 1, beta - 1, beta, True)
@@ -1017,7 +1033,7 @@ def evaluate_move_worker(args):
         # Log detailed error including the move being processed
         # traceback.print_exc() # Uncomment for full traceback in worker logs
         print(f"Error in worker process for move {move}: {type(e).__name__} - {e}")
-        return -float('inf') if is_maximizing else float('inf')
+        return -CHECKMATE_SCORE if is_maximizing else CHECKMATE_SCORE
 
 
 # --- Main AI Function (Using Iterative Deepening + Cache) ---
@@ -1048,20 +1064,10 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1, time_limit=Non
         print("AI Error: Cannot find move, waiting for promotion choice.")
         return None if return_top_n == 1 else []
 
-    # --- Check Move Cache (with depth, fallback to best available) ---
+    # --- Check Move Cache (exact depth only) ---
     pos_hash = get_position_hash(gamestate)
     cache_key = (pos_hash, depth)  # Include depth in cache key
     cached_move_repr = move_cache.get(cache_key)
-    
-    # Fallback: if exact depth not cached, use best available (highest depth <= requested)
-    if not cached_move_repr and return_top_n == 1:
-        best_fallback_depth = -1
-        for (h, d), mr in move_cache.items():
-            if h == pos_hash and d <= depth and d > best_fallback_depth:
-                best_fallback_depth = d
-                cached_move_repr = mr
-        if cached_move_repr:
-            print(f"[CACHE FALLBACK] Hash {pos_hash}: No depth {depth} entry, using depth {best_fallback_depth} entry.")
 
     # Only use cache if we want single best move
     if return_top_n == 1 and cached_move_repr:
