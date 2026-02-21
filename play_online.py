@@ -1374,20 +1374,38 @@ def play_game(page):
     print(f"{'═' * 50}")
     _screenshot(page, "game_over")
     
-    # Save detailed log for lost games
+    # Determine game result
     result_lower = result_text.lower()
-    is_win = 'you won' in result_lower
-    is_draw = 'draw' in result_lower or 'stalemate' in result_lower
-    is_loss = (not is_win and not is_draw and 
-               ('lost' in result_lower or 'you lost' in result_lower
-                or 'timeout' in result_lower
-                or 'won' in result_lower  # opponent won
-                or 'checkmate' in result_lower
-                or 'resign' in result_lower))
-    if is_loss or ('unknown' in result_lower and moves_made > 0):
+    # Check score-based result (most reliable)
+    if '1-0' in result_text:
+        is_win = (our_color == 'w')
+        is_loss = (our_color == 'b')
+    elif '0-1' in result_text:
+        is_win = (our_color == 'b')
+        is_loss = (our_color == 'w')
+    elif 'draw' in result_lower or 'stalemate' in result_lower or '½-½' in result_text:
+        is_win = False
+        is_loss = False
+    else:
+        # Fallback: check who resigned/won
+        is_win = ('you won' in result_lower
+                  or (our_color == 'b' and 'white resigned' in result_lower)
+                  or (our_color == 'w' and 'black resigned' in result_lower))
+        is_loss = (not is_win and 
+                   ('you lost' in result_lower or 'lost' in result_lower
+                    or (our_color == 'w' and 'white resigned' in result_lower)
+                    or (our_color == 'b' and 'black resigned' in result_lower)
+                    or 'timeout' in result_lower
+                    or 'checkmate' in result_lower))
+    is_draw = not is_win and not is_loss
+    
+    result_label = "WIN" if is_win else ("LOSS" if is_loss else "DRAW")
+    print(f"   📊 Result: {result_label}")
+    
+    if is_loss or (not is_win and not is_draw and moves_made > 0):
         _save_loss_log(game_log, our_color, result_text, moves_made)
     else:
-        print(f"   ✅ Win/draw — no detailed log saved")
+        print(f"   ✅ {result_label} — no detailed log saved")
     
     # Save accumulated cache to local DB
     try:
