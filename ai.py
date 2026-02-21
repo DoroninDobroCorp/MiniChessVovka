@@ -64,6 +64,9 @@ move_cache = {}
 # key: position hash; value: dict(depth=int, score=float, flag=str('EXACT'|'LOWERBOUND'|'UPPERBOUND'), best_move=move)
 tt = {}
 
+# Depth threshold: depths below this use single-threaded (to build TT), depths >= this use parallel workers
+PARALLEL_DEPTH_THRESHOLD = 4
+
 # --- Killer Moves and History Heuristic ---
 killer_moves = {}  # {depth: [move1, move2]}
 history_scores = {}  # {move_repr: score}
@@ -1099,9 +1102,15 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1, time_limit=Non
 
     try:
         # === ITERATIVE DEEPENING ===
+        # Depths 1 to PARALLEL_DEPTH_THRESHOLD-1: single-threaded (builds TT for move ordering)
+        # Depths PARALLEL_DEPTH_THRESHOLD+: parallel workers (receive TT snapshot)
         best_move = None
         best_score = 0
         all_move_scores = []  # For return_top_n > 1
+        
+        # Clear TT at start of new search to avoid stale entries
+        global tt
+        tt.clear()
         
         for current_depth in range(1, depth + 1):
             iteration_start = time.time()
@@ -1122,12 +1131,28 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1, time_limit=Non
                     except:
                         pass
             
-            # Search at current depth - returns (best_move, best_score) or (best_move, best_score, all_results)
-            if return_top_n > 1 and current_depth == depth:
-                # For final depth, get all move scores
-                iter_best_move, iter_best_score, all_move_scores = minimax(gamestate, current_depth, move_cache, return_all_scores=True)
+            # Choose single-threaded vs parallel based on depth
+            if current_depth < PARALLEL_DEPTH_THRESHOLD:
+                # Single-threaded: builds global TT for deeper searches
+                iter_best_move_score = minimax_alpha_beta(
+                    gamestate, current_depth, -float('inf'), float('inf'), is_maximizing)
+                iter_best_move = iter_best_move_score[1]
+                iter_best_score = iter_best_move_score[0]
+                # minimax_alpha_beta returns (score, best_move) — score is from perspective of position
+                if is_maximizing:
+                    iter_best_score = iter_best_move_score[0]
+                else:
+                    iter_best_score = iter_best_move_score[0]
+            elif return_top_n > 1 and current_depth == depth:
+                # Parallel: final depth, get all move scores
+                tt_snapshot = dict(tt) if tt else None
+                iter_best_move, iter_best_score, all_move_scores = minimax(
+                    gamestate, current_depth, move_cache, return_all_scores=True, tt_data=tt_snapshot)
             else:
-                iter_best_move, iter_best_score = minimax(gamestate, current_depth, move_cache)
+                # Parallel: pass TT snapshot from single-threaded iterations
+                tt_snapshot = dict(tt) if tt else None
+                iter_best_move, iter_best_score = minimax(
+                    gamestate, current_depth, move_cache, tt_data=tt_snapshot)
             
             if iter_best_move:
                 best_move = iter_best_move
@@ -1168,6 +1193,18 @@ def find_best_move(gamestate: GameState, depth=6, return_top_n=1, time_limit=Non
         cache_key = (pos_hash, depth)
         move_cache[cache_key] = repr(best_move)
         print(f"[CACHE STORE] Hash {pos_hash} Depth {depth}: Stored move {repr(best_move)}.")
+        
+        # Persist valuable TT entries to move_cache for future games
+        tt_saved = 0
+        for tt_hash, tt_entry in tt.items():
+            tt_d = tt_entry.get('depth', 0)
+            if tt_d >= 4 and tt_entry.get('flag') == 'EXACT' and tt_entry.get('best_move'):
+                tt_key = (tt_hash, tt_d)
+                if tt_key not in move_cache:
+                    move_cache[tt_key] = repr(tt_entry['best_move'])
+                    tt_saved += 1
+        if tt_saved > 0:
+            print(f"  [TT→CACHE] Saved {tt_saved} intermediate positions from TT (depth≥4, EXACT)")
     else:
         print(f"AI ({gamestate.current_turn}) could not find a best move after {end_time - start_time:.2f}s. Legal moves: {legal_moves}")
 
@@ -1204,12 +1241,13 @@ if 'GameState' in globals() and not hasattr(GameState, 'is_move_legal'):
 # but ensuring setup runs once might be useful.
 # setup_db() # Let load_move_cache_from_db handle this.
 
-def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
+def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False, tt_data=None):
     """Starts the parallel minimax search.
     
     Args:
         return_all_scores: If True, returns (best_move, best_score, all_move_scores_list)
                           If False, returns (best_move, best_score)
+        tt_data: Optional TT snapshot from single-threaded iterations for move ordering
     """
     try:
         start_time_minimax = time.time()
@@ -1221,19 +1259,11 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
         num_workers = NUM_WORKERS if NUM_WORKERS else multiprocessing.cpu_count()
         print(f"Using {num_workers} worker processes for depth {depth} search.")
         
+        # Serialize TT snapshot for workers (if available)
+        tt_dump = pickle.dumps(tt_data) if tt_data else None
+        
         # Use ProcessPoolExecutor for better cleanup
         with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-            # We need to pass the move cache, but Manager is tricky with Executor.
-            # For now, we'll skip sharing the cache dynamically during the parallel step
-            # to avoid complexity and overhead. Workers will use their local cache (empty)
-            # or we can pass a copy. Passing a copy is safer.
-            # Actually, the worker function signature expects move_cache.
-            # We can pass None or an empty dict if we don't want to sync.
-            # Syncing via Manager with Executor is possible but 'multiprocessing.Manager'
-            # creates a server process which we want to avoid if it causes issues.
-            # Let's pass None for now and rely on the main process to update the cache
-            # based on results.
-            
             futures = []
             try:
                 gamestate_dump = pickle.dumps(gamestate)
@@ -1245,7 +1275,7 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
             
             # Search first move sequentially to get a baseline score for aspiration window
             first_move = legal_moves[0]
-            first_result = _minimax_worker(first_move, gamestate_dump, depth, -float('inf'), float('inf'), maximizing_player, None)
+            first_result = _minimax_worker(first_move, gamestate_dump, depth, -float('inf'), float('inf'), maximizing_player, None, tt_dump)
             baseline_score = first_result[1] if first_result else 0
             ASPIRATION_WINDOW = 150  # centipawns
             asp_alpha = baseline_score - ASPIRATION_WINDOW
@@ -1253,7 +1283,7 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
             
             # Search remaining moves in parallel with tighter window
             for move in legal_moves[1:]:
-                future = executor.submit(_minimax_worker, move, gamestate_dump, depth, asp_alpha, asp_beta, maximizing_player, None)
+                future = executor.submit(_minimax_worker, move, gamestate_dump, depth, asp_alpha, asp_beta, maximizing_player, None, tt_dump)
                 futures.append(future)
 
             results = [first_result]
@@ -1274,7 +1304,7 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
             # Re-search moves that fell outside aspiration window with full alpha/beta
             for move in re_search_moves:
                 try:
-                    res = _minimax_worker(move, gamestate_dump, depth, -float('inf'), float('inf'), maximizing_player, None)
+                    res = _minimax_worker(move, gamestate_dump, depth, -float('inf'), float('inf'), maximizing_player, None, tt_dump)
                     if res:
                         results.append(res)
                 except Exception as e:
@@ -1349,10 +1379,17 @@ def minimax(gamestate: GameState, depth, move_cache, return_all_scores=False):
              result = (None, 0, []) if return_all_scores else (None, 0)
              return result
 
-def _minimax_worker(move, gamestate_dump, depth, alpha, beta, maximizing_player, move_cache):
+def _minimax_worker(move, gamestate_dump, depth, alpha, beta, maximizing_player, move_cache, tt_dump=None):
     """Minimax function for a single move, executed by a worker process."""
-    # print(f"Worker evaluating move: {move}, Depth: {depth}, Max: {maximizing_player}")
     try:
+        # Initialize worker's TT from snapshot (if available)
+        global tt
+        if tt_dump:
+            try:
+                tt = pickle.loads(tt_dump)
+            except:
+                tt = {}
+        
         # Deserialize inside the worker
         gamestate_copy = pickle.loads(gamestate_dump)
         
