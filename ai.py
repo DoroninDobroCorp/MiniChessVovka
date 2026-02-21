@@ -41,9 +41,18 @@ DROP_THREAT_BONUS = 25 # Extra bonus for having pieces in hand (drop threats)
 OPEN_FILE_ROOK_BONUS = 30 # Bonus for rook on a file with no friendly pawns
 SEMI_OPEN_FILE_ROOK_BONUS = 15 # Bonus for rook on a file with no enemy pawns blocked
 
+# King safety: pawn shield is critical in crazyhouse (opponents can drop near your king)
+PAWN_SHIELD_BONUS = 40  # per pawn in front of king
+EXPOSED_KING_PENALTY = 80  # penalty when no pawn shield and opponent has drops
+BISHOP_PAIR_BONUS = 50  # having both bishops on 6x6
+
 # Passed pawn bonus by distance to promotion (exponential scaling for 6x6 board)
 # Index = steps remaining to promotion rank (1=one step away, 4=just left start)
 PASSED_PAWN_BONUS = {1: 500, 2: 200, 3: 80, 4: 30}
+# Extra bonus for a passed pawn with no piece blocking its path (truly open road)
+UNSTOPPABLE_PAWN_BONUS = {1: 300, 2: 120, 3: 40}
+# Penalty for a pawn blocked by any piece directly ahead
+BLOCKED_PAWN_PENALTY = 25
 # Bonus for having pawns in hand that could be dropped near promotion
 DROP_PAWN_PROMO_BONUS = 250
 
@@ -218,7 +227,8 @@ def get_position_hash(gamestate: GameState):
         castling = (castling_w_k, castling_w_q, castling_b_k, castling_b_q)
 
         # Combine all relevant state information into a tuple
-        state_tuple = (board_tuple, white_hand_tuple, black_hand_tuple, turn, en_passant, castling)
+        promoted = tuple(sorted(getattr(gamestate, 'promoted_pieces', set())))
+        state_tuple = (board_tuple, white_hand_tuple, black_hand_tuple, turn, en_passant, castling, promoted)
 
         # Convert tuple to a string representation for hashing
         # Using repr() is generally safe and stable for tuples of primitives/basic types
@@ -351,37 +361,81 @@ def evaluate_position(gamestate: GameState):
         # Check adjacent files for friendly pawns
         if c > 0 and gamestate.board[r][c-1] == 'P': score += PAWN_STRUCTURE_BONUS
         if c < BOARD_SIZE-1 and gamestate.board[r][c+1] == 'P': score += PAWN_STRUCTURE_BONUS
+        # Blocked pawn penalty
+        if r > 0 and gamestate.board[r-1][c] != EMPTY_SQUARE:
+            score -= BLOCKED_PAWN_PENALTY
         # Add bonus for passed pawns (no opponent pawns ahead in this or adjacent files) - simplified
         is_passed = True
+        path_clear = True  # no pieces at all on the file ahead
         for scan_r in range(r - 1, -1, -1): # Check rows ahead
             if gamestate.board[scan_r][c] == 'p': is_passed = False; break
             if c > 0 and gamestate.board[scan_r][c-1] == 'p': is_passed = False; break
             if c < BOARD_SIZE-1 and gamestate.board[scan_r][c+1] == 'p': is_passed = False; break
+            if gamestate.board[scan_r][c] != EMPTY_SQUARE: path_clear = False
         if is_passed:
             steps_to_promo = r  # white pawn at row r needs r steps to reach row 0
             score += PASSED_PAWN_BONUS.get(steps_to_promo, 15)
+            if path_clear:
+                score += UNSTOPPABLE_PAWN_BONUS.get(steps_to_promo, 0)
 
     for r, c in black_pawns:
         if c > 0 and gamestate.board[r][c-1] == 'p': score -= PAWN_STRUCTURE_BONUS
         if c < BOARD_SIZE-1 and gamestate.board[r][c+1] == 'p': score -= PAWN_STRUCTURE_BONUS
+        # Blocked pawn penalty
+        if r < BOARD_SIZE-1 and gamestate.board[r+1][c] != EMPTY_SQUARE:
+            score += BLOCKED_PAWN_PENALTY
         is_passed = True
+        path_clear = True
         for scan_r in range(r + 1, BOARD_SIZE): # Check rows ahead
             if gamestate.board[scan_r][c] == 'P': is_passed = False; break
             if c > 0 and gamestate.board[scan_r][c-1] == 'P': is_passed = False; break
             if c < BOARD_SIZE-1 and gamestate.board[scan_r][c+1] == 'P': is_passed = False; break
+            if gamestate.board[scan_r][c] != EMPTY_SQUARE: path_clear = False
         if is_passed:
             steps_to_promo = BOARD_SIZE - 1 - r  # black pawn at row r needs (5-r) steps to row 5
             score -= PASSED_PAWN_BONUS.get(steps_to_promo, 15)
+            if path_clear:
+                score -= UNSTOPPABLE_PAWN_BONUS.get(steps_to_promo, 0)
 
-    # 4. King Safety (endgame vs opening)
-    if phase == OPENING_PHASE:
-        # Penalty for king being too exposed (e.g., in center) - Needs better logic
-        if (white_king_r, white_king_c) in CENTER_SQUARES: score -= 20
-        if (black_king_r, black_king_c) in CENTER_SQUARES: score += 20
-    else: # Endgame
-        # Bonus for king being active / closer to center
-        if (white_king_r, white_king_c) in CENTER_SQUARES: score += 10
-        if (black_king_r, black_king_c) in CENTER_SQUARES: score -= 10
+    # 4. King Safety — pawn shield is CRITICAL in crazyhouse
+    black_hand_total = sum(gamestate.hands.get('b', {}).values())
+    white_hand_total = sum(gamestate.hands.get('w', {}).values())
+    
+    if white_king_r != -1:
+        # White king pawn shield: pawns on rank directly in front (row - 1) and diagonals
+        w_shield = 0
+        for dc in (-1, 0, 1):
+            sc = white_king_c + dc
+            sr = white_king_r - 1  # row in front of white king
+            if 0 <= sr < BOARD_SIZE and 0 <= sc < BOARD_SIZE:
+                if gamestate.board[sr][sc] == 'P':
+                    w_shield += 1
+        score += w_shield * PAWN_SHIELD_BONUS
+        # Exposed king penalty scales with opponent's hand (more drops = more danger)
+        if w_shield == 0 and black_hand_total > 0:
+            score -= EXPOSED_KING_PENALTY * min(black_hand_total, 3)
+        # Center king penalty (opening)
+        if phase == OPENING_PHASE:
+            if (white_king_r, white_king_c) in CENTER_SQUARES: score -= 30
+    
+    if black_king_r != -1:
+        b_shield = 0
+        for dc in (-1, 0, 1):
+            sc = black_king_c + dc
+            sr = black_king_r + 1  # row in front of black king
+            if 0 <= sr < BOARD_SIZE and 0 <= sc < BOARD_SIZE:
+                if gamestate.board[sr][sc] == 'p':
+                    b_shield += 1
+        score -= b_shield * PAWN_SHIELD_BONUS
+        if b_shield == 0 and white_hand_total > 0:
+            score += EXPOSED_KING_PENALTY * min(white_hand_total, 3)
+        if phase == OPENING_PHASE:
+            if (black_king_r, black_king_c) in CENTER_SQUARES: score += 30
+    
+    if phase == ENDGAME_PHASE:
+        # Endgame: king should be active / closer to center
+        if white_king_r != -1 and (white_king_r, white_king_c) in CENTER_SQUARES: score += 15
+        if black_king_r != -1 and (black_king_r, black_king_c) in CENTER_SQUARES: score -= 15
 
     # 5. IMPROVED: Piece Development Bonus (opening phase)
     if phase == OPENING_PHASE:
@@ -444,20 +498,18 @@ def evaluate_position(gamestate: GameState):
     # 7. Tempo bonus for side to move (slight advantage)
     score += 10 if gamestate.current_turn == 'w' else -10
 
-    # 8. Drop pawn near promotion bonus
+    # 8. Drop pawn near promotion bonus (scale with opportunities)
     white_hand_pawns = gamestate.hands.get('w', {}).get('P', 0)
     black_hand_pawns = gamestate.hands.get('b', {}).get('P', 0)
     if white_hand_pawns > 0:
-        # Count empty squares on rank 5 (row 1) where white can drop and promote next move
-        for c in range(BOARD_SIZE):
-            if gamestate.board[1][c] == EMPTY_SQUARE:
-                score += DROP_PAWN_PROMO_BONUS
-                break  # One opportunity is enough for bonus
+        # Rank 5 = row 1 for white. Each empty square is a potential drop+promote
+        drop_spots = sum(1 for c in range(BOARD_SIZE) if gamestate.board[1][c] == EMPTY_SQUARE)
+        if drop_spots > 0:
+            score += DROP_PAWN_PROMO_BONUS + (drop_spots - 1) * 50
     if black_hand_pawns > 0:
-        for c in range(BOARD_SIZE):
-            if gamestate.board[BOARD_SIZE - 2][c] == EMPTY_SQUARE:
-                score -= DROP_PAWN_PROMO_BONUS
-                break
+        drop_spots = sum(1 for c in range(BOARD_SIZE) if gamestate.board[BOARD_SIZE - 2][c] == EMPTY_SQUARE)
+        if drop_spots > 0:
+            score -= DROP_PAWN_PROMO_BONUS + (drop_spots - 1) * 50
 
     # 9. Rook on open/semi-open file bonus
     for r in range(BOARD_SIZE):
@@ -487,6 +539,20 @@ def evaluate_position(gamestate: GameState):
             else:
                 score -= bonus
 
+    # 10. Bishop pair bonus — strong diagonal control on small board
+    white_bishops = 0
+    black_bishops = 0
+    for r in range(BOARD_SIZE):
+        for c in range(BOARD_SIZE):
+            p = gamestate.board[r][c]
+            if p == 'B': white_bishops += 1
+            elif p == 'b': black_bishops += 1
+    if white_bishops >= 2: score += BISHOP_PAIR_BONUS
+    if black_bishops >= 2: score -= BISHOP_PAIR_BONUS
+    # Also count bishops in hand
+    if white_bishops + gamestate.hands.get('w', {}).get('B', 0) >= 2: score += BISHOP_PAIR_BONUS // 2
+    if black_bishops + gamestate.hands.get('b', {}).get('B', 0) >= 2: score -= BISHOP_PAIR_BONUS // 2
+
     return score
 
 
@@ -504,6 +570,21 @@ def is_noisy_move(gamestate, move):
     except Exception:
         pass
     return False
+
+def is_check_move(gamestate, move):
+    """Quick check: does this move give check to the opponent?"""
+    try:
+        gamestate.make_ai_move(move)
+        opponent = gamestate.current_turn  # after move, it's opponent's turn
+        in_check = gamestate.is_in_check(opponent)
+        gamestate.undo_ai_move()
+        return in_check
+    except Exception:
+        try:
+            gamestate.undo_ai_move()
+        except Exception:
+            pass
+        return False
 
 def _is_drop_near_king(gamestate, move):
     """Check if a drop lands adjacent to (or attacks) the enemy king."""
@@ -526,9 +607,10 @@ def _is_drop_near_king(gamestate, move):
 
 
 def get_noisy_moves(gamestate: GameState):
-    """Get tactical moves for quiescence: captures, promotions, and drops near enemy king."""
+    """Get tactical moves for quiescence: captures, promotions, checks, and drops near enemy king."""
     moves = gamestate.get_all_legal_moves()
     noisy_moves = []
+    check_candidates = []  # test checks only for non-noisy moves to save time
     for move in moves:
         try:
             if isinstance(move, tuple) and move and move[0] == 'drop':
@@ -542,8 +624,14 @@ def get_noisy_moves(gamestate: GameState):
             is_promotion = promotion is not None
             if is_capture or is_promotion:
                 noisy_moves.append(move)
+            else:
+                check_candidates.append(move)
         except Exception:
             continue
+    # Also include quiet moves that give check (limit to save performance)
+    for move in check_candidates[:12]:
+        if is_check_move(gamestate, move):
+            noisy_moves.append(move)
     return noisy_moves
 
 
@@ -633,9 +721,15 @@ def mvv_lva_score(gamestate, move):
         aggressor_value = PIECE_VALUES.get(aggressor_piece.upper(), 0)
         piece_color = get_piece_color(aggressor_piece)
         
-        # 1. CAPTURES - MVV-LVA
+        # 1. CAPTURES - MVV-LVA (account for promoted pieces yielding only P in hand)
         if victim_piece != EMPTY_SQUARE:
             victim_value = PIECE_VALUES.get(victim_piece.upper(), 0)
+            # In crazyhouse, capturing a promoted piece only gives P in hand
+            promoted_set = getattr(gamestate, 'promoted_pieces', set())
+            if (end_r, end_c) in promoted_set:
+                # Still removes a strong piece from board, but hand value is only P
+                # Use average: board removal value + hand gain value
+                victim_value = (victim_value + PIECE_VALUES['P']) // 2
             # High score for capturing valuable piece with less valuable one
             score += (victim_value * 10) - aggressor_value
         
@@ -681,6 +775,17 @@ def mvv_lva_score(gamestate, move):
             
             base_score = HAND_PIECE_VALUES.get(piece_type, 0) // 10
             
+            # PAWN DROP NEAR PROMOTION — highest priority drop
+            if piece_type == 'P':
+                if piece_color == 'w' and drop_r == 1:  # one step from promotion
+                    base_score += 800
+                elif piece_color == 'w' and drop_r == 2:  # two steps
+                    base_score += 200
+                elif piece_color == 'b' and drop_r == BOARD_SIZE - 2:
+                    base_score += 800
+                elif piece_color == 'b' and drop_r == BOARD_SIZE - 3:
+                    base_score += 200
+            
             # DROP IN CENTER
             if (drop_r, drop_c) in CENTER_SQUARES:
                 base_score += 50
@@ -690,8 +795,25 @@ def mvv_lva_score(gamestate, move):
             enemy_king_pos = gamestate.king_pos.get(enemy_color)
             if enemy_king_pos:
                 ek_r, ek_c = enemy_king_pos
-                if max(abs(drop_r - ek_r), abs(drop_c - ek_c)) <= 2:
-                    base_score += 100  # Drop attacking king!
+                dist = max(abs(drop_r - ek_r), abs(drop_c - ek_c))
+                if dist <= 1:
+                    base_score += 200  # Adjacent to king!
+                elif dist <= 2:
+                    base_score += 100  # Drop in king zone
+            
+            # KNIGHT FORK DETECTION — knight drop attacking multiple pieces
+            if piece_type == 'N':
+                attacks = 0
+                for dr, df in KNIGHT_MOVES:
+                    nr, nf = drop_r + dr, drop_c + df
+                    if 0 <= nr < BOARD_SIZE and 0 <= nf < BOARD_SIZE:
+                        target = gamestate.board[nr][nf]
+                        if target != EMPTY_SQUARE and get_piece_color(target) == enemy_color:
+                            attacks += 1
+                            if target.upper() in ('K', 'R'):
+                                base_score += 300  # Forking king or rook
+                if attacks >= 2:
+                    base_score += 200  # Fork bonus
             
             move_repr = repr(move)
             history_bonus = history_scores.get(move_repr, 0)
@@ -1261,10 +1383,16 @@ def _minimax_worker(move, gamestate_dump, depth, alpha, beta, maximizing_player,
         return move, error_score
 
 def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_player, allow_null=True):
-    """Recursive helper for minimax with alpha-beta pruning, null-move pruning, LMR, TT, and mate priority."""
+    """Recursive helper for minimax with alpha-beta pruning, null-move pruning, LMR, check extensions, TT."""
 
-    # --- Depth Limit Check first (avoid expensive move gen) ---
-    if depth == 0:
+    # --- Check Extension: if we're in check, don't lose depth ---
+    current_color = 'w' if maximizing_player else 'b'
+    in_check = gamestate.is_in_check(current_color)
+    if in_check and depth < 3:
+        depth += 1  # extend search when in check (cap to avoid explosion)
+
+    # --- Depth Limit Check ---
+    if depth <= 0:
         return _quiescence_search(gamestate, alpha, beta, maximizing_player, MAX_QUIESCENCE_DEPTH)
 
     # --- Terminal State Check ---
@@ -1289,13 +1417,12 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
             return tt_entry['score']
 
     # --- Null-Move Pruning ---
-    # Skip when opponent has pieces in hand (crazyhouse drops make null-move dangerous)
+    # Skip when in check or opponent has pieces in hand (crazyhouse drops make null-move dangerous)
     NULL_MOVE_R = 2
-    current_color = 'w' if maximizing_player else 'b'
     opponent_color = 'b' if maximizing_player else 'w'
     opponent_hand_count = sum(gamestate.hands.get(opponent_color, {}).values())
     if (allow_null and depth >= NULL_MOVE_R + 1
-            and not gamestate.is_in_check(current_color)
+            and not in_check
             and opponent_hand_count == 0):
         gamestate.current_turn = get_opposite_color(gamestate.current_turn)
         gamestate._all_legal_moves_cache = None
@@ -1326,16 +1453,19 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
     orig_alpha = alpha
     best_move_here = legal_moves[0] if legal_moves else None
 
-    # --- Move Iteration with Mate Priority and LMR ---
+    # --- Move Iteration with Mate Priority, LMR, and Check Extensions ---
     if maximizing_player:
         max_eval = -float('inf')
         for i, move in enumerate(legal_moves):
             noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
-            # Late Move Reduction
+            # Check if this move gives check (don't reduce checking moves)
+            gives_check = gamestate.is_in_check(gamestate.current_turn)
+            
+            # Late Move Reduction — skip for noisy or checking moves
             if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
-                    and not noisy):
+                    and not noisy and not gives_check):
                 eval_score = _minimax_recursive(gamestate, depth - 2, alpha, beta, False)
                 if eval_score > alpha:
                     eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, False)
@@ -1371,9 +1501,11 @@ def _minimax_recursive(gamestate: GameState, depth, alpha, beta, maximizing_play
             noisy = is_noisy_move(gamestate, move)
             gamestate.make_ai_move(move)
             
-            # Late Move Reduction
+            gives_check = gamestate.is_in_check(gamestate.current_turn)
+            
+            # Late Move Reduction — skip for noisy or checking moves
             if (i >= LMR_FULL_DEPTH_MOVES and depth >= LMR_REDUCTION_LIMIT
-                    and not noisy):
+                    and not noisy and not gives_check):
                 eval_score = _minimax_recursive(gamestate, depth - 2, alpha, beta, True)
                 if eval_score < beta:
                     eval_score = _minimax_recursive(gamestate, depth - 1, alpha, beta, True)

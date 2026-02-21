@@ -38,6 +38,7 @@ class GameState:
         self._is_check_cache = None
         self._hash_cache = None # Добавляем кэш для хэша
         self.ai_history = [] # Stack for AI undo
+        self.promoted_pieces = set()  # coords (r,c) of promoted pieces (ex-pawns)
 
 
     def save_state(self):
@@ -52,7 +53,8 @@ class GameState:
             'last_move': self.last_move,
             'game_over_message': self.game_over_message,
             'needs_promotion_choice': self.needs_promotion_choice,
-            'promotion_square': self.promotion_square
+            'promotion_square': self.promotion_square,
+            'promoted_pieces': set(self.promoted_pieces)
             # 'last_move_for_promotion' might be needed if undo happens during promotion choice
         }
         self.saved_states.append(state)
@@ -81,6 +83,7 @@ class GameState:
         self.game_over_message = prev_state['game_over_message']
         self.needs_promotion_choice = prev_state['needs_promotion_choice']
         self.promotion_square = prev_state['promotion_square']
+        self.promoted_pieces = set(prev_state.get('promoted_pieces', set()))
         # self.last_move_for_promotion = prev_state.get('last_move_for_promotion') # Restore if needed
 
         # Clear selections and highlights
@@ -137,6 +140,7 @@ class GameState:
         new_state.white_ai_enabled = self.white_ai_enabled
         new_state.black_ai_enabled = self.black_ai_enabled
         new_state.ai_depth = self.ai_depth
+        new_state.promoted_pieces = set(self.promoted_pieces)
         new_state._all_legal_moves_cache = None
 
         return new_state
@@ -163,6 +167,7 @@ class GameState:
         new_state.stalemate = self.stalemate
         new_state.needs_promotion_choice = self.needs_promotion_choice
         new_state.promotion_square = self.promotion_square
+        new_state.promoted_pieces = set(self.promoted_pieces)
         
         # НЕ копируем: saved_states, move_log, UI элементы, кеши
         # Это делает копирование в ~10-20 раз быстрее
@@ -293,15 +298,22 @@ class GameState:
             captured_type = target_piece.upper()
             if captured_type == 'K':
                  print("Error: King capture detected - should not happen in legal moves.")
-                 # This indicates a potential issue in move generation or checking
-                 # Revert board state? For now, just log it.
             else:
+                 # Crazyhouse: promoted piece reverts to pawn when captured
+                 if (r2, f2) in self.promoted_pieces:
+                     captured_type = 'P'
+                     self.promoted_pieces.discard((r2, f2))
                  # Ensure hand structure exists
                  if moving_color not in self.hands: self.hands[moving_color] = {}
                  for p_upper in "PNBRQ": # Ensure all keys exist
                       if p_upper not in self.hands[moving_color]: self.hands[moving_color][p_upper] = 0
 
                  self.hands[moving_color][captured_type] = self.hands[moving_color].get(captured_type, 0) + 1
+
+        # Track movement of promoted pieces
+        if (r1, f1) in self.promoted_pieces:
+            self.promoted_pieces.discard((r1, f1))
+            self.promoted_pieces.add((r2, f2))
 
         # Update King position if King moved
         if piece.upper() == 'K':
@@ -324,6 +336,7 @@ class GameState:
                           self.hands[moving_color][captured_type] -= 1
                      return False
                 self.board[r2][f2] = promotion_choice
+                self.promoted_pieces.add((r2, f2))  # track as promoted
                 self.needs_promotion_choice = False # Promotion was handled
                 self.promotion_square = None
                 self.last_move_for_promotion = None
@@ -375,6 +388,7 @@ class GameState:
 
         # Update board
         self.board[r][f] = chosen_piece_char
+        self.promoted_pieces.add((r, f))  # track as promoted
 
         # Update the last move in the log
         if self.move_log and self.last_move_for_promotion:
@@ -733,12 +747,25 @@ class GameState:
             if target != EMPTY_SQUARE:
                 undo_info['captured'] = target
                 captured_type = target.upper()
+                # Crazyhouse: promoted piece reverts to pawn when captured
+                if (r2, f2) in self.promoted_pieces:
+                    captured_type = 'P'
+                    self.promoted_pieces.discard((r2, f2))
+                    undo_info['was_promoted'] = True
                 self.hands[color][captured_type] = self.hands[color].get(captured_type, 0) + 1
             
+            # Track movement of promoted pieces
+            if (r1, f1) in self.promoted_pieces:
+                self.promoted_pieces.discard((r1, f1))
+                self.promoted_pieces.add((r2, f2))
+                undo_info['moved_promoted'] = True
+
             # Update board
             self.board[r1][f1] = EMPTY_SQUARE
             if promotion:
                 self.board[r2][f2] = promotion
+                self.promoted_pieces.add((r2, f2))  # new promotion
+                undo_info['new_promotion'] = True
             else:
                 self.board[r2][f2] = piece
                 
@@ -785,11 +812,20 @@ class GameState:
             (r1, f1), (r2, f2), promotion = move
             # Current board[r2][f2] is the piece that moved (or promoted)
             moved_piece = self.board[r2][f2]
+            color = get_piece_color(moved_piece)
+            
+            # Undo promotion tracking
+            if undo_info.get('new_promotion'):
+                self.promoted_pieces.discard((r2, f2))
             
             # If promotion, we need to revert to pawn
             if promotion:
-                color = get_piece_color(moved_piece)
                 moved_piece = 'P' if color == 'w' else 'p'
+            
+            # Undo movement of promoted piece
+            if undo_info.get('moved_promoted'):
+                self.promoted_pieces.discard((r2, f2))
+                self.promoted_pieces.add((r1, f1))
             
             # Move back
             self.board[r1][f1] = moved_piece
@@ -798,8 +834,12 @@ class GameState:
             captured = undo_info['captured']
             if captured:
                 self.board[r2][f2] = captured
-                color = get_piece_color(moved_piece)
-                self.hands[color][captured.upper()] -= 1
+                # Undo the hand change: we added P (if was_promoted) or captured_type
+                if undo_info.get('was_promoted'):
+                    self.hands[color]['P'] -= 1
+                    self.promoted_pieces.add((r2, f2))  # restore promoted status
+                else:
+                    self.hands[color][captured.upper()] -= 1
             else:
                 self.board[r2][f2] = EMPTY_SQUARE
                 

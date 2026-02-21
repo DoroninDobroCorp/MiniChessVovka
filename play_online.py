@@ -44,6 +44,7 @@ CHESS_COM_URL = "https://www.chess.com"
 PROFILE_DIR = Path(__file__).parent / ".chess_com_profile"
 STATE_FILE = Path(__file__).parent / ".chess_com_chrome_state.json"
 OUTPUT_DIR = Path(__file__).parent / ".bot_screenshots"
+HEARTBEAT_FILE = Path(__file__).parent / ".bot_heartbeat"
 
 # Credentials (NOT committed — .gitignore should cover dotfiles)
 EMAIL = "***REMOVED***"
@@ -148,6 +149,16 @@ def _free_port():
         return s.getsockname()[1]
 
 
+def heartbeat(status="alive", extra=""):
+    """Write heartbeat file with timestamp + status for monitor_bot.sh to check."""
+    try:
+        HEARTBEAT_FILE.write_text(
+            f"{int(time.time())}|{status}|{extra}\n"
+        )
+    except Exception:
+        pass
+
+
 def _screenshot(page, name):
     out = OUTPUT_DIR / f"{name}.png"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -183,8 +194,9 @@ def launch_chrome(profile_dir):
         "--window-size=1440,900",
     ]
     
-    # Headless mode for servers without display
-    if not os.environ.get("DISPLAY"):
+    # Headless mode for Linux servers without display (not macOS which has Aqua)
+    import platform
+    if platform.system() != 'Darwin' and not os.environ.get("DISPLAY"):
         args += ["--headless=new", "--no-sandbox", "--disable-gpu"]
     
     args.append("about:blank")
@@ -424,12 +436,25 @@ def login_chess_com(page):
     # Google OAuth page — handle account chooser or email input
     try:
         # Check if account chooser is shown (Google already has session)
-        account_item = page.locator(f'li:has-text("{EMAIL}")')
-        if account_item.count() > 0:
-            print(f"   📧 Account chooser found — selecting {EMAIL}")
-            account_item.first.click(timeout=10000)
-            time.sleep(5)
-        else:
+        # Google uses div, li, or data-email for account items
+        account_found = False
+        for acc_sel in [
+            f'div[data-email="{EMAIL}"]',
+            f'li:has-text("{EMAIL}")',
+            f'div:has-text("{EMAIL}"):not(:has(div:has-text("{EMAIL}")))',  # leaf div
+        ]:
+            try:
+                account_item = page.locator(acc_sel)
+                if account_item.count() > 0:
+                    print(f"   📧 Account chooser found — selecting {EMAIL}")
+                    account_item.first.click(timeout=10000)
+                    account_found = True
+                    time.sleep(5)
+                    break
+            except Exception:
+                continue
+        
+        if not account_found:
             # No account chooser — need to enter email
             print("   📧 Entering Google email...")
             email_input = page.locator('input[type="email"], #identifierId')
@@ -1200,6 +1225,7 @@ def play_game(page):
     print(f"♟️  GAME STARTED! We are {'WHITE ♙' if our_color == 'w' else 'BLACK ♟'}")
     print(f"{'═' * 50}")
     _screenshot(page, "game_start")
+    heartbeat("playing", f"color={our_color}")
     
     while True:
         # Check if game is still active
@@ -1227,6 +1253,7 @@ def play_game(page):
         print_board(gs)
         
         # Get AI move
+        heartbeat("thinking", f"move={moves_made + 1}")
         best_move, move_info = get_ai_move(gs, our_color, our_move_history=our_move_history)
         if not best_move:
             print("   ❌ No move found!")
@@ -1294,14 +1321,19 @@ def play_game(page):
             continue
         
         moves_made += 1
+        heartbeat("moved", f"move={moves_made}")
         
         # Record played move for cycle detection
         our_move_history.append(best_move)
         
         # Wait for opponent's move (or game end)
         print(f"   ⏳ Waiting for opponent...")
+        wait_ticks = 0
         for _ in range(3600):  # up to 30 min
             time.sleep(1)
+            wait_ticks += 1
+            if wait_ticks % 60 == 0:
+                heartbeat("waiting_opponent", f"move={moves_made}")
             if not is_game_active(page):
                 break
             opp_moves = get_dom_move_count(page)
@@ -1561,6 +1593,7 @@ def auto_loop(page):
 
     while True:
         game_num += 1
+        heartbeat("seeking", f"game={game_num}")
         print(f"\n{'╔' + '═' * 48 + '╗'}")
         print(f"║  GAME #{game_num:03d}                                        ║")
         print(f"{'╚' + '═' * 48 + '╝'}")
