@@ -7,7 +7,9 @@ use crate::eval::{evaluate_position, CHECKMATE_SCORE, STALEMATE_SCORE};
 use crate::zobrist;
 
 const MAX_QUIESCENCE_DEPTH: i32 = 4;
-const PARALLEL_DEPTH_THRESHOLD: i32 = 4;
+// Parallel search disabled — single-threaded minimax_ab is correct and fast enough
+// (parallel had bugs: no move ordering, stale TT, missing killer/history in workers)
+const PARALLEL_DEPTH_THRESHOLD: i32 = 999;
 
 // TT entry
 #[derive(Clone)]
@@ -347,9 +349,11 @@ fn minimax_ab(
     let opponent_hand: u8 = gs.hands[opponent_color.index()].iter().sum();
     if allow_null && depth >= null_move_r + 1 && !in_check && opponent_hand == 0 {
         gs.current_turn = gs.current_turn.opposite();
+        gs.hash = gs.compute_hash();
         gs.invalidate_cache();
         let (null_score, _) = minimax_ab(gs, depth - 1 - null_move_r, alpha, beta, !maximizing, false, ss);
         gs.current_turn = gs.current_turn.opposite();
+        gs.hash = gs.compute_hash();
         gs.invalidate_cache();
 
         if maximizing && null_score >= beta { return (beta, Move::NULL); }
@@ -566,9 +570,11 @@ fn minimax_recursive(
     let opp_hand: u8 = gs.hands[opp.index()].iter().sum();
     if allow_null && depth >= null_r + 1 && !in_check && opp_hand == 0 {
         gs.current_turn = gs.current_turn.opposite();
+        gs.hash = gs.compute_hash();
         gs.invalidate_cache();
         let null_score = minimax_recursive(gs, depth - 1 - null_r, alpha, beta, !maximizing, false, ss);
         gs.current_turn = gs.current_turn.opposite();
+        gs.hash = gs.compute_hash();
         gs.invalidate_cache();
         if maximizing && null_score >= beta { return beta; }
         if !maximizing && null_score <= alpha { return alpha; }
