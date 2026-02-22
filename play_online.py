@@ -1083,7 +1083,7 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
         return would
     
     # Try cache — use configured depth for actual moves
-    search_depth = gamestate.ai_depth if hasattr(gamestate, 'ai_depth') else 6
+    search_depth = gamestate.ai_depth if hasattr(gamestate, 'ai_depth') else 8
     cache_key = (pos_hash, search_depth)
     cached = ai_module.move_cache.get(cache_key)
     if cached:
@@ -1100,7 +1100,7 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
     
     print("   📊 No cache hit, running AI search...")
     try:
-        best_move = find_best_move(gamestate, depth=search_depth, time_limit=30)
+        best_move = find_best_move(gamestate, depth=search_depth, time_limit=60)
         if best_move:
             if _would_cycle(best_move):
                 print(f"   🔄 AI move {format_move_for_print(best_move)} creates cycle, finding alternative...")
@@ -1583,22 +1583,33 @@ def create_minihouse_game(page, rated=False):
 
     # Step 9: Click "Play!" to start seeking
     print("   🚀 Starting game search...")
+    clicked = False
     try:
         play_btn = page.locator('button.ui_v5-button-component:has-text("Play!")')
-        if play_btn.count() > 0:
+        btn_count = play_btn.count()
+        print(f"   📋 Found {btn_count} 'Play!' buttons")
+        if btn_count > 0:
             play_btn.first.click()
             time.sleep(3)
             print("   ✅ Clicked Play! — waiting for opponent...")
+            clicked = True
         else:
-            for sel in ['button:has-text("Play!")', 'button.ui_v5-button-primary']:
+            print("   ⚠️  No Play! button found, trying fallbacks...")
+            for sel in ['button:has-text("Play!")', 'button.ui_v5-button-primary', 'button:has-text("play")']:
                 el = page.locator(sel)
                 if el.count() > 0:
                     el.first.click()
                     time.sleep(3)
                     print(f"   ✅ Clicked via: {sel}")
+                    clicked = True
                     break
     except Exception as e:
-        print(f"   ⚠️  Play button click: {e}")
+        print(f"   ⚠️  Play button click error: {e}")
+
+    if not clicked:
+        print("   ❌ Could not click Play! button")
+        _screenshot(page, "05_seeking_failed")
+        return False
 
     _screenshot(page, "05_seeking")
     print("   ✅ Game creation flow complete")
