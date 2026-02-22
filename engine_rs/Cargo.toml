@@ -1,0 +1,20 @@
+[package]
+name = "minichess_engine"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "minichess_engine"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module"] }
+rand = "0.8"
+rayon = "1.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
+lazy_static = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
