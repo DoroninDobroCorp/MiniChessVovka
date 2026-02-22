@@ -32,7 +32,7 @@ class GameState:
         # По умолчанию: оба игрока - люди (AI можно включить через кнопки в GUI)
         self.white_ai_enabled = False  # По умолчанию: игрок играет за белых
         self.black_ai_enabled = False  # По умолчанию: игрок играет за черных (включи AI кнопкой!)
-        self.ai_depth = 8  # Deep search — Rust engine handles depth 8 in <1s
+        self.ai_depth = 10  # Deep search — Rust engine handles depth 10 in ~4s
         self.show_hint = False # Note: show_hint itself is global in main.py
         self._all_legal_moves_cache = None
         self._is_check_cache = None

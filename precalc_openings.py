@@ -19,7 +19,7 @@ from gamestate import GameState
 import ai as ai_module
 from ai import find_best_move, save_move_cache_to_db, load_move_cache_from_db, get_position_hash
 
-DEPTH = 8  # Rust engine can handle deeper search efficiently
+DEPTH = 10  # Rust engine can handle depth 10 in ~4s per position
 TIME_LIMIT = None  # No time limit — full quality search
 
 
