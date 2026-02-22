@@ -617,7 +617,7 @@ def setup_game(page):
 
 # ── Board Reading ───────────────────────────────────────────
 
-def read_board_from_dom(page):
+def read_board_from_dom(page, our_color=None):
     """Read the current board position from chess.com variants DOM.
     
     Variants site uses:
@@ -678,7 +678,7 @@ def read_board_from_dom(page):
         return None
     
     sq_px = board_data.get('squarePx', 70)
-    flipped = is_board_flipped(page)
+    flipped = (our_color == 'b') if our_color else is_board_flipped(page)
     board_mid_y = sq_px * 4  # midpoint of 8x8 grid = 280px
     
     # Build a GameState from the board data
@@ -877,8 +877,7 @@ def make_move_on_board(page, move, our_color):
         return make_drop_on_board(page, move, our_color)
     
     (from_row, from_col), (to_row, to_col), promotion = move
-    flipped = is_board_flipped(page)
-    
+    flipped = (our_color == 'b')
     from_grid_col, from_grid_row = internal_to_grid(from_row, from_col, flipped)
     to_grid_col, to_grid_row = internal_to_grid(to_row, to_col, flipped)
     
@@ -910,7 +909,7 @@ def make_drop_on_board(page, move, our_color):
     and click with page.mouse.click() — JS events don't work for chess.com's board.
     """
     _, piece_code, (to_row, to_col) = move
-    flipped = is_board_flipped(page)
+    flipped = (our_color == 'b')
     to_grid_col, to_grid_row = internal_to_grid(to_row, to_col, flipped)
     
     to_alg = coords_to_algebraic(to_row, to_col)
@@ -1243,7 +1242,7 @@ def play_game(page):
             continue
         
         # Read the board
-        gs = read_board_from_dom(page)
+        gs = read_board_from_dom(page, our_color)
         if not gs:
             time.sleep(2)
             continue
