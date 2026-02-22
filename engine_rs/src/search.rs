@@ -326,7 +326,10 @@ fn minimax_ab(
 
     let mut legal_moves = gs.get_legal_moves_vec();
     if legal_moves.is_empty() {
-        return (evaluate_position(gs), Move::NULL);
+        if gs.is_in_check(gs.current_turn) {
+            return (if gs.current_turn == Color::White { -CHECKMATE_SCORE } else { CHECKMATE_SCORE }, Move::NULL);
+        }
+        return (STALEMATE_SCORE, Move::NULL);
     }
 
     // TT probe
