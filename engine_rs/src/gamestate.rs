@@ -469,13 +469,18 @@ impl GameState {
             if target != Piece::Empty {
                 undo.captured = target;
                 let mut captured_type = target.piece_type().unwrap();
-                // Crazyhouse: promoted piece reverts to pawn
-                if self.promoted_pieces & (1u64 << to) != 0 {
-                    captured_type = PieceType::Pawn;
-                    self.promoted_pieces &= !(1u64 << to);
-                    undo.was_promoted = true;
+                // Kings can't be captured/added to hand
+                if captured_type == PieceType::King {
+                    // Illegal state — skip hand update
+                } else {
+                    // Crazyhouse: promoted piece reverts to pawn
+                    if self.promoted_pieces & (1u64 << to) != 0 {
+                        captured_type = PieceType::Pawn;
+                        self.promoted_pieces &= !(1u64 << to);
+                        undo.was_promoted = true;
+                    }
+                    self.hands[color.index()][captured_type.index()] += 1;
                 }
-                self.hands[color.index()][captured_type.index()] += 1;
             }
 
             // Track promoted piece movement
@@ -559,7 +564,9 @@ impl GameState {
                     self.promoted_pieces |= 1u64 << to;
                 } else {
                     let captured_type = undo.captured.piece_type().unwrap();
-                    self.hands[color.index()][captured_type.index()] -= 1;
+                    if captured_type != PieceType::King {
+                        self.hands[color.index()][captured_type.index()] -= 1;
+                    }
                 }
             } else {
                 self.board[to] = Piece::Empty;
@@ -642,11 +649,13 @@ impl GameState {
 
         if is_capture {
             let mut captured_type = target.piece_type().unwrap();
-            if self.promoted_pieces & (1u64 << to) != 0 {
-                captured_type = PieceType::Pawn;
-                self.promoted_pieces &= !(1u64 << to);
+            if captured_type != PieceType::King {
+                if self.promoted_pieces & (1u64 << to) != 0 {
+                    captured_type = PieceType::Pawn;
+                    self.promoted_pieces &= !(1u64 << to);
+                }
+                self.hands[color.index()][captured_type.index()] += 1;
             }
-            self.hands[color.index()][captured_type.index()] += 1;
         }
 
         // Track promoted piece movement
