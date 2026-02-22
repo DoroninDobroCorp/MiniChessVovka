@@ -31,6 +31,9 @@ pub struct SearchState {
     pub tt: HashMap<u64, TTEntry>,
     pub killer_moves: HashMap<i32, [Move; 2]>,
     pub history_scores: HashMap<u32, i32>, // move.data -> score
+    pub deadline: Option<Instant>,
+    pub stopped: bool,
+    nodes_since_check: u32,
 }
 
 impl SearchState {
@@ -39,6 +42,9 @@ impl SearchState {
             tt: HashMap::with_capacity(1 << 20),
             killer_moves: HashMap::new(),
             history_scores: HashMap::new(),
+            deadline: None,
+            stopped: false,
+            nodes_since_check: 0,
         }
     }
 
@@ -46,6 +52,23 @@ impl SearchState {
         self.tt.clear();
         self.killer_moves.clear();
         self.history_scores.clear();
+    }
+
+    /// Check deadline every 4096 nodes to avoid syscall overhead
+    #[inline]
+    pub fn check_deadline(&mut self) -> bool {
+        if self.stopped { return true; }
+        self.nodes_since_check += 1;
+        if self.nodes_since_check >= 4096 {
+            self.nodes_since_check = 0;
+            if let Some(dl) = self.deadline {
+                if Instant::now() >= dl {
+                    self.stopped = true;
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -310,6 +333,11 @@ fn minimax_ab(
     allow_null: bool,
     ss: &mut SearchState,
 ) -> (i32, Move) {
+    // Abort search if time limit reached
+    if ss.check_deadline() {
+        return (evaluate_position(gs), Move::NULL);
+    }
+
     let current_color = if maximizing { Color::White } else { Color::Black };
     let in_check = gs.is_in_check(current_color);
     if in_check && depth > 0 && depth < 3 {
@@ -803,6 +831,7 @@ pub fn find_best_move(
     }
 
     let mut ss = SearchState::new();
+    ss.deadline = time_limit.map(|secs| start + std::time::Duration::from_secs_f64(secs));
     let mut best_move = Move::NULL;
     let mut best_score = 0i32;
 
@@ -812,6 +841,16 @@ pub fn find_best_move(
 
         if current_depth < PARALLEL_DEPTH_THRESHOLD {
             let (score, m) = minimax_ab(gs, current_depth, i32::MIN + 1, i32::MAX - 1, maximizing, true, &mut ss);
+            // If stopped mid-search, only use result if we have a previous best
+            if ss.stopped {
+                if !m.is_null() && current_depth <= 2 {
+                    // Only trust very shallow aborted results
+                    best_move = m;
+                    best_score = score;
+                }
+                eprintln!("  Time limit reached during depth {}, aborting", current_depth);
+                break;
+            }
             if !m.is_null() {
                 best_move = m;
                 best_score = score;

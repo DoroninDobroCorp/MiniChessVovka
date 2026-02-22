@@ -1099,7 +1099,7 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
     
     print("   📊 No cache hit, running AI search...")
     try:
-        best_move = find_best_move(gamestate, depth=search_depth, time_limit=60)
+        best_move = find_best_move(gamestate, depth=search_depth, time_limit=90)
         if best_move:
             if _would_cycle(best_move):
                 print(f"   🔄 AI move {format_move_for_print(best_move)} creates cycle, finding alternative...")
@@ -1638,7 +1638,7 @@ def auto_loop(page):
                 continue
 
         # Create game
-        if not create_minihouse_game(page, rated=False):
+        if not create_minihouse_game(page, rated=True):
             print("   ❌ Failed to create game. Retrying in 30s...")
             time.sleep(30)
             continue
