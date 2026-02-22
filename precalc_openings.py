@@ -19,7 +19,7 @@ from gamestate import GameState
 import ai as ai_module
 from ai import find_best_move, save_move_cache_to_db, load_move_cache_from_db, get_position_hash
 
-DEPTH = 6
+DEPTH = 8  # Rust engine can handle deeper search efficiently
 TIME_LIMIT = None  # No time limit — full quality search
 
 
@@ -35,19 +35,6 @@ def format_move(m):
 
 def calc_position(gs, label):
     """Calculate best move for a position, return (move, score, time)."""
-    pos_hash = get_position_hash(gs)
-    
-    # Check if already in cache at depth 6
-    key = (pos_hash, DEPTH)
-    if key in ai_module.move_cache:
-        cached = ai_module.move_cache[key]
-        try:
-            cached_move = eval(cached)
-            print(f"  ✅ CACHED: {label} → {format_move(cached_move)}")
-            return cached_move, 0, 0
-        except:
-            pass
-    
     legal = gs.get_all_legal_moves()
     if not legal:
         print(f"  ⚠️  No legal moves for {label}")
@@ -59,15 +46,11 @@ def calc_position(gs, label):
     elapsed = time.time() - t0
     
     if best:
-        # Get score from cache
-        score = 0
-        if key in ai_module.move_cache:
-            score = "cached"
         print(f"  ✅ {label} → {format_move(best)} ({elapsed:.1f}s)")
     else:
         print(f"  ❌ {label} → no move found ({elapsed:.1f}s)")
     
-    return best, score, elapsed
+    return best, 0, elapsed
 
 
 def make_start_gs():
@@ -90,7 +73,6 @@ def main():
     
     # Load existing cache
     load_move_cache_from_db()
-    print(f"📦 Cache: {len(ai_module.move_cache)} entries loaded")
     
     gs0 = make_start_gs()
     total_positions = 0
@@ -108,7 +90,7 @@ def main():
     total_positions += 1
     
     # Save after each level
-    save_move_cache_to_db(ai_module.move_cache)
+    save_move_cache_to_db()
     
     # ═══════════════════════════════════════════
     # LEVEL 1: All white first moves → black's response
@@ -136,11 +118,11 @@ def main():
         
         # Save periodically
         if (i + 1) % 5 == 0:
-            save_move_cache_to_db(ai_module.move_cache)
-            print(f"  💾 Saved cache ({len(ai_module.move_cache)} entries)")
+            save_move_cache_to_db()
+            print(f"  💾 Saved cache")
     
-    save_move_cache_to_db(ai_module.move_cache)
-    print(f"  💾 Saved cache ({len(ai_module.move_cache)} entries)")
+    save_move_cache_to_db()
+    print(f"  💾 Saved cache")
     
     # ═══════════════════════════════════════════
     # LEVEL 2: White's best 2nd move for each (w1, b1) pair
@@ -156,10 +138,10 @@ def main():
         total_positions += 1
         
         if (i + 1) % 5 == 0:
-            save_move_cache_to_db(ai_module.move_cache)
-            print(f"  💾 Saved cache ({len(ai_module.move_cache)} entries)")
+            save_move_cache_to_db()
+            print(f"  💾 Saved cache")
     
-    save_move_cache_to_db(ai_module.move_cache)
+    save_move_cache_to_db()
     
     # ═══════════════════════════════════════════
     # LEVEL 2b: For the BEST white move, also calc ALL black responses → white's 2nd move
@@ -193,10 +175,10 @@ def main():
                 total_positions += 1
             
             if (i + 1) % 3 == 0:
-                save_move_cache_to_db(ai_module.move_cache)
-                print(f"  💾 Saved cache ({len(ai_module.move_cache)} entries)")
+                save_move_cache_to_db()
+                print(f"  💾 Saved cache")
         
-        save_move_cache_to_db(ai_module.move_cache)
+        save_move_cache_to_db()
     
     # ═══════════════════════════════════════════
     # DONE
@@ -205,7 +187,7 @@ def main():
     print(f"✅ PRECALCULATION COMPLETE")
     print(f"   Positions calculated: {total_positions}")
     print(f"   Total time: {total_time:.0f}s ({total_time/60:.1f} min)")
-    print(f"   Cache size: {len(ai_module.move_cache)} entries")
+    print(f"   Cache size: see move_cache.db")
     print("═" * 60)
 
 

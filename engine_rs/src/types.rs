@@ -325,6 +325,7 @@ pub const KING_OFFSETS: [(i32, i32); 8] = [
 
 /// Piece values in centipawns
 pub const PIECE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 20000]; // P N B R Q K
-pub const HAND_PIECE_VALUES: [i32; 5] = [150, 400, 410, 650, 1000]; // P N B R Q
+// Hand pieces worth significantly more: instant deployment, surprise factor, tempo
+pub const HAND_PIECE_VALUES: [i32; 5] = [200, 550, 530, 800, 1200]; // P N B R Q
 
 pub const PROMOTION_PIECES: [PieceType; 3] = [PieceType::Rook, PieceType::Knight, PieceType::Bishop];

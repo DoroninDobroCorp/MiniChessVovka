@@ -1,32 +1,48 @@
 use crate::types::*;
 use crate::gamestate::GameState;
 
-// Constants matching Python ai.py
+// --- Evaluation Constants for 6x6 Crazyhouse ---
+// Tuned for: small board, drops dominate tactics, pawn promo race is key,
+// king safety is life-or-death, 90s/move allows deep search.
+
 const CENTER_SQUARES: [usize; 4] = [
     2 * BOARD_SIZE + 2, // (2,2)
     2 * BOARD_SIZE + 3, // (2,3)
     3 * BOARD_SIZE + 2, // (3,2)
     3 * BOARD_SIZE + 3, // (3,3)
 ];
-const CENTER_BONUS: i32 = 15;
-const KING_SAFETY_BONUS: i32 = 8;
-const MOBILITY_BONUS: i32 = 3;
-const PAWN_STRUCTURE_BONUS: i32 = 5;
-const ATTACK_KING_ZONE_BONUS: i32 = 20;
-const DROP_THREAT_BONUS: i32 = 25;
-const OPEN_FILE_ROOK_BONUS: i32 = 30;
-const SEMI_OPEN_FILE_ROOK_BONUS: i32 = 15;
-const PAWN_SHIELD_BONUS: i32 = 40;
-const EXPOSED_KING_PENALTY: i32 = 80;
-const BISHOP_PAIR_BONUS: i32 = 50;
-const BLOCKED_PAWN_PENALTY: i32 = 25;
-const DROP_PAWN_PROMO_BONUS: i32 = 250;
+// Wider center: also reward (1,2),(1,3),(4,2),(4,3) — extended center
+const EXTENDED_CENTER: [usize; 8] = [
+    1 * BOARD_SIZE + 2, 1 * BOARD_SIZE + 3,
+    4 * BOARD_SIZE + 2, 4 * BOARD_SIZE + 3,
+    2 * BOARD_SIZE + 1, 2 * BOARD_SIZE + 4,
+    3 * BOARD_SIZE + 1, 3 * BOARD_SIZE + 4,
+];
+
+const CENTER_BONUS: i32 = 12;
+const EXTENDED_CENTER_BONUS: i32 = 6;
+const KING_SAFETY_BONUS: i32 = 10;
+const MOBILITY_BONUS: i32 = 4;
+const PAWN_STRUCTURE_BONUS: i32 = 8;
+const ATTACK_KING_ZONE_BONUS: i32 = 28;
+const DROP_THREAT_BONUS: i32 = 35;
+const OPEN_FILE_ROOK_BONUS: i32 = 35;
+const SEMI_OPEN_FILE_ROOK_BONUS: i32 = 18;
+const PAWN_SHIELD_BONUS: i32 = 55;
+const EXPOSED_KING_PENALTY: i32 = 130;
+const BISHOP_PAIR_BONUS: i32 = 45;
+const BLOCKED_PAWN_PENALTY: i32 = 30;
+const DROP_PAWN_PROMO_BONUS: i32 = 120;
 
 pub const CHECKMATE_SCORE: i32 = 1_000_000;
 pub const STALEMATE_SCORE: i32 = 0;
 
 fn is_center(s: usize) -> bool {
     CENTER_SQUARES.contains(&s)
+}
+
+fn is_extended_center(s: usize) -> bool {
+    EXTENDED_CENTER.contains(&s)
 }
 
 pub fn evaluate_position(gs: &GameState) -> i32 {
@@ -82,6 +98,7 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
             Color::White => {
                 score += val;
                 if is_center(s) { score += CENTER_BONUS; }
+                else if is_extended_center(s) { score += EXTENDED_CENTER_BONUS; }
                 if pt == PieceType::Pawn { white_pawns.push((r as usize, c as usize)); }
                 if pt != PieceType::King {
                     let dist = (r - wk_r).abs().max((c - wk_c).abs());
@@ -91,6 +108,7 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
             Color::Black => {
                 score -= val;
                 if is_center(s) { score -= CENTER_BONUS; }
+                else if is_extended_center(s) { score -= EXTENDED_CENTER_BONUS; }
                 if pt == PieceType::Pawn { black_pawns.push((r as usize, c as usize)); }
                 if pt != PieceType::King {
                     let dist = (r - bk_r).abs().max((c - bk_c).abs());
@@ -100,7 +118,7 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
         }
     }
 
-    // Hand material
+    // Hand material — pieces in hand are worth more (instant deployment)
     let wh_total: u8 = gs.hands[0].iter().sum();
     let bh_total: u8 = gs.hands[1].iter().sum();
     for pt in 0..5 {
@@ -109,8 +127,11 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
         score -= HAND_PIECE_VALUES[pt] * gs.hands[1][pt] as i32;
         total_material += PIECE_VALUES[pt] * gs.hands[1][pt] as i32;
     }
-    score += wh_total as i32 * DROP_THREAT_BONUS;
-    score -= bh_total as i32 * DROP_THREAT_BONUS;
+    // Progressive drop threat: more pieces in hand = exponentially more dangerous
+    let w_drop_threat = (wh_total as i32) * DROP_THREAT_BONUS + (wh_total as i32).max(1) * (wh_total as i32 - 1).max(0) * 10;
+    let b_drop_threat = (bh_total as i32) * DROP_THREAT_BONUS + (bh_total as i32).max(1) * (bh_total as i32 - 1).max(0) * 10;
+    score += w_drop_threat;
+    score -= b_drop_threat;
 
     // Phase detection
     let endgame = total_material < 2 * PIECE_VALUES[PieceType::Rook.index()] + 2 * PIECE_VALUES[PieceType::King.index()];
@@ -157,11 +178,12 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
             if gs.board[sq(scan_r, c)] != Piece::Empty { path_clear = false; }
         }
         if is_passed {
+            // Reduced: pawn promotes to R/N/B max (not Queen), opponent can block via drops
             let steps = r; // steps to row 0
-            let bonus = match steps { 1 => 500, 2 => 200, 3 => 80, 4 => 30, _ => 15 };
+            let bonus = match steps { 1 => 180, 2 => 70, 3 => 25, 4 => 10, _ => 5 };
             score += bonus;
             if path_clear {
-                let ub = match steps { 1 => 300, 2 => 120, 3 => 40, _ => 0 };
+                let ub = match steps { 1 => 100, 2 => 35, 3 => 12, _ => 0 };
                 score += ub;
             }
         }
@@ -181,16 +203,16 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
         }
         if is_passed {
             let steps = BOARD_SIZE - 1 - r;
-            let bonus = match steps { 1 => 500, 2 => 200, 3 => 80, 4 => 30, _ => 15 };
+            let bonus = match steps { 1 => 180, 2 => 70, 3 => 25, 4 => 10, _ => 5 };
             score -= bonus;
             if path_clear {
-                let ub = match steps { 1 => 300, 2 => 120, 3 => 40, _ => 0 };
+                let ub = match steps { 1 => 100, 2 => 35, 3 => 12, _ => 0 };
                 score -= ub;
             }
         }
     }
 
-    // 4. King safety — pawn shield
+    // 4. King safety — pawn shield (critical in crazyhouse)
     {
         let mut w_shield = 0i32;
         for dc in -1..=1i32 {
@@ -206,7 +228,7 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
         if w_shield == 0 && bh_total > 0 {
             score -= EXPOSED_KING_PENALTY * (bh_total as i32).min(3);
         }
-        if !endgame && is_center(gs.king_pos[0]) { score -= 30; }
+        if !endgame && is_center(gs.king_pos[0]) { score -= 40; }
 
         let mut b_shield = 0i32;
         for dc in -1..=1i32 {
@@ -222,16 +244,24 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
         if b_shield == 0 && wh_total > 0 {
             score += EXPOSED_KING_PENALTY * (wh_total as i32).min(3);
         }
-        if !endgame && is_center(gs.king_pos[1]) { score += 30; }
+        if !endgame && is_center(gs.king_pos[1]) { score += 40; }
+
+        // NEW: King on edge bonus in opening (corners are safer in crazyhouse)
+        if !endgame {
+            let w_edge = (wk_r == 5 || wk_c == 0 || wk_c == 5) as i32;
+            let b_edge = (bk_r == 0 || bk_c == 0 || bk_c == 5) as i32;
+            score += w_edge * 15;
+            score -= b_edge * 15;
+        }
     }
 
     // Endgame king activity
     if endgame {
-        if is_center(gs.king_pos[0]) { score += 15; }
-        if is_center(gs.king_pos[1]) { score -= 15; }
+        if is_center(gs.king_pos[0]) { score += 20; }
+        if is_center(gs.king_pos[1]) { score -= 20; }
     }
 
-    // 5. Development (opening)
+    // 5. Development (opening) — stronger penalty for undeveloped pieces
     if !endgame {
         let mut w_undev = 0i32;
         for c in 0..BOARD_SIZE {
@@ -240,7 +270,7 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
                 w_undev += 1;
             }
         }
-        score -= w_undev * 15;
+        score -= w_undev * 20;
 
         let mut b_undev = 0i32;
         for c in 0..BOARD_SIZE {
@@ -249,7 +279,7 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
                 b_undev += 1;
             }
         }
-        score += b_undev * 15;
+        score += b_undev * 20;
     }
 
     // 6. King attack zone
@@ -303,20 +333,60 @@ pub fn evaluate_position(gs: &GameState) -> i32 {
     // 7. Tempo
     score += if gs.current_turn == Color::White { 10 } else { -10 };
 
-    // 8. Drop pawn near promotion
+    // 8. Drop pawn near promotion (reduced — opponent can block via drops)
     if gs.hands[0][PieceType::Pawn.index()] > 0 {
         let mut spots = 0;
         for c in 0..BOARD_SIZE {
             if gs.board[sq(1, c)].is_empty() { spots += 1; }
         }
-        if spots > 0 { score += DROP_PAWN_PROMO_BONUS + (spots - 1) * 50; }
+        if spots > 0 { score += DROP_PAWN_PROMO_BONUS + (spots - 1) * 25; }
     }
     if gs.hands[1][PieceType::Pawn.index()] > 0 {
         let mut spots = 0;
         for c in 0..BOARD_SIZE {
             if gs.board[sq(BOARD_SIZE - 2, c)].is_empty() { spots += 1; }
         }
-        if spots > 0 { score -= DROP_PAWN_PROMO_BONUS + (spots - 1) * 50; }
+        if spots > 0 { score -= DROP_PAWN_PROMO_BONUS + (spots - 1) * 25; }
+    }
+
+    // NEW: 8b. Drop-check threat — can we drop a piece giving check?
+    // Knight in hand that can drop to check enemy king = huge threat
+    if gs.hands[0][PieceType::Knight.index()] > 0 {
+        for &(dr, df) in &KNIGHT_OFFSETS {
+            let nr = bk_r + dr;
+            let nf = bk_c + df;
+            if nr >= 0 && nr < BOARD_SIZE as i32 && nf >= 0 && nf < BOARD_SIZE as i32 {
+                if gs.board[sq(nr as usize, nf as usize)].is_empty() {
+                    score += 40;
+                    break; // one drop-check square is enough
+                }
+            }
+        }
+    }
+    if gs.hands[1][PieceType::Knight.index()] > 0 {
+        for &(dr, df) in &KNIGHT_OFFSETS {
+            let nr = wk_r + dr;
+            let nf = wk_c + df;
+            if nr >= 0 && nr < BOARD_SIZE as i32 && nf >= 0 && nf < BOARD_SIZE as i32 {
+                if gs.board[sq(nr as usize, nf as usize)].is_empty() {
+                    score -= 40;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Rook/Bishop in hand near enemy king file/diagonal = latent threat
+    if gs.hands[0][PieceType::Rook.index()] > 0 {
+        // Can drop rook on enemy king's rank or file
+        for c in 0..BOARD_SIZE {
+            if gs.board[sq(bk_r as usize, c)].is_empty() { score += 25; break; }
+        }
+    }
+    if gs.hands[1][PieceType::Rook.index()] > 0 {
+        for c in 0..BOARD_SIZE {
+            if gs.board[sq(wk_r as usize, c)].is_empty() { score -= 25; break; }
+        }
     }
 
     // 9. Rook on open/semi-open file
