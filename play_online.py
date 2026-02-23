@@ -3,11 +3,17 @@
 MiniChess Online Bot — plays minihouse on chess.com via Chrome + Playwright.
 
 Uses the trained move_cache.db and AI engine from the MiniChess project.
-Browser automation borrowed from research-automation patterns.
+
+Prerequisites:
+    pip install -r requirements.txt
+    python -m playwright install chromium
+
+Configuration:
+    Set credentials in .env file (see .env.example)
 
 Usage:
-    # From MiniChess directory, using research-automation's venv:
-    ../research-automation/venv/bin/python play_online.py
+    python play_online.py --auto           # Auto-play mode
+    python play_online.py --account dobro  # Use separate profile
 """
 
 import json

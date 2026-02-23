@@ -60,20 +60,37 @@ python main.py
 
 ### Chess.com Bot
 
-```bash
-# 1. Create .env file with your credentials
-cp .env.example .env
-# Edit .env and add your chess.com email/password
+**Prerequisites:**
+- Chess.com account
+- Playwright and Chromium installed
 
-# 2. Start bot (casual mode)
+**Setup:**
+```bash
+# 1. Install bot dependencies
+pip install -r requirements.txt
+python -m playwright install chromium
+
+# 2. Configure credentials
+cp .env.example .env
+nano .env  # Add your chess.com email and password
+```
+
+**Run:**
+```bash
+# Start bot in casual mode (recommended for testing)
 ./bot_start.sh casual
 
-# Start bot (rated mode)
+# Start bot in rated mode
 ./bot_start.sh rated
 
 # Stop bot
 ./bot_stop.sh
+
+# Monitor bot activity
+./monitor_bot.sh
 ```
+
+**Note:** The bot uses browser automation to play games on chess.com. Make sure you comply with chess.com's Terms of Service.
 
 ## 🏗️ Architecture
 
