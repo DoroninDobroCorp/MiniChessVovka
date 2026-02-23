@@ -899,6 +899,50 @@ def is_game_active(page):
     }""")
 
 
+def read_our_clock(page):
+    """Read our (bottom) clock and return remaining time in seconds, or None."""
+    try:
+        text = page.evaluate("""() => {
+            const el = document.querySelector('.playerbox-bottom .clock-component');
+            return el ? el.textContent.trim() : null;
+        }""")
+        if not text:
+            return None
+        # Formats: "M:SS", "H:MM:SS", "S.s" (< 10 s)
+        parts = text.replace(',', '.').split(':')
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(parts[0])
+    except Exception as e:
+        print(f"   ⚠️  Could not read clock: {e}")
+        return None
+
+
+def send_chat_message(page, text):
+    """Type and send a message in the in-game chat."""
+    try:
+        page.evaluate("""(msg) => {
+            const input = document.querySelector('input.chat-input-component')
+                       || document.querySelector('input[placeholder*="chat" i]')
+                       || document.querySelector('.chat-input-component input');
+            if (input) {
+                const nativeSet = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype, 'value').set;
+                nativeSet.call(input, msg);
+                input.dispatchEvent(new Event('input', {bubbles: true}));
+                input.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', keyCode:13, bubbles:true}));
+                input.dispatchEvent(new KeyboardEvent('keyup',   {key:'Enter', code:'Enter', keyCode:13, bubbles:true}));
+                return true;
+            }
+            return false;
+        }""", text)
+        print(f"   💬 Chat: {text}")
+    except Exception as e:
+        print(f"   ⚠️  Chat send failed: {e}")
+
+
 def is_our_turn(page, our_color):
     """Check if it's our turn to move."""
     current_turn = detect_turn(page)
@@ -1079,8 +1123,11 @@ def _would_create_move_cycle(our_move_history, candidate_move):
     return False, 0
 
 
-def get_ai_move(gamestate, our_color, our_move_history=None):
+def get_ai_move(gamestate, our_color, our_move_history=None, time_remaining=None):
     """Get the best move from cache or AI engine, avoiding move cycles.
+    
+    Args:
+        time_remaining: Our clock in seconds (None = unknown / no pressure).
     
     Returns: (move, move_info) where move_info is a dict with:
         source: 'cache'|'search'|'alt_search'|'fallback_nocycle'|'random'
@@ -1138,13 +1185,20 @@ def get_ai_move(gamestate, our_color, our_move_history=None):
             pass
     
     print("   📊 No cache hit, running AI search...")
+    # Time management: cap thinking when clock is low
+    search_time_limit = 90
+    alt_time_limit = 15
+    if time_remaining is not None and time_remaining < 180:
+        search_time_limit = 30
+        alt_time_limit = 10
+        print(f"   ⏱️  Low time ({time_remaining:.0f}s left) — limiting search to {search_time_limit}s")
     try:
-        best_move = find_best_move(gamestate, depth=search_depth, time_limit=90)
+        best_move = find_best_move(gamestate, depth=search_depth, time_limit=search_time_limit)
         if best_move:
             if _would_cycle(best_move):
                 print(f"   🔄 AI move {format_move_for_print(best_move)} creates cycle, finding alternative...")
                 try:
-                    top_moves = find_best_move(gamestate, depth=max(4, search_depth - 2), return_top_n=5, time_limit=15)
+                    top_moves = find_best_move(gamestate, depth=max(4, search_depth - 2), return_top_n=5, time_limit=alt_time_limit)
                     if isinstance(top_moves, list):
                         for alt_move, alt_score in top_moves:
                             if not _would_create_move_cycle(our_move_history, alt_move)[0]:
@@ -1267,6 +1321,7 @@ def play_game(page):
     print(f"{'═' * 50}")
     _screenshot(page, "game_start")
     heartbeat("playing", f"color={our_color}")
+    send_chat_message(page, "I am sorry guys, I am just a bot =)")
     
     while True:
         # Check if game is still active
@@ -1295,7 +1350,8 @@ def play_game(page):
         
         # Get AI move
         heartbeat("thinking", f"move={moves_made + 1}")
-        best_move, move_info = get_ai_move(gs, our_color, our_move_history=our_move_history)
+        time_remaining = read_our_clock(page)
+        best_move, move_info = get_ai_move(gs, our_color, our_move_history=our_move_history, time_remaining=time_remaining)
         if not best_move:
             print("   ❌ No move found!")
             time.sleep(2)
