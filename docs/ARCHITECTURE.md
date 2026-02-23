@@ -2,33 +2,74 @@
 
 ## Overview
 
-A 6×6 crazyhouse chess engine + chess.com browser automation bot.
+A 6×6 crazyhouse chess engine with a Rust-accelerated search backend + chess.com browser automation bot.
 Crazyhouse = captured pieces go to your "hand" and can be dropped back onto the board.
 
 ## Directory Structure
 
 ```
-├── ai.py                 # Search engine (minimax, alpha-beta, quiescence, eval)
-├── gamestate.py           # Game rules, move generation, make/undo moves
-├── config.py              # Board size, constants
-├── pieces.py              # Piece definitions, movement patterns
-├── utils.py               # Formatting, coordinate conversion helpers
-├── play_online.py         # Browser automation bot (chess.com integration)
-├── play.sh                # Local CLI game launcher
-├── bot_start.sh           # Start the online bot
-├── bot_stop.sh            # Stop the online bot
-├── move_cache.db          # SQLite cache of AI-evaluated positions
-├── engine/                # (reserved for future engine modules)
-├── nn/                    # Neural network experiments (MCTS, model)
-├── tests/                 # Test suite
-│   ├── test_ai_optimization.py
-│   └── test_nightly.py
-└── docs/
-    ├── ARCHITECTURE.md    # This file
-    └── IMPROVEMENTS.md    # Future improvement ideas
+MiniChess/
+├── ai.py                   # AI wrapper — delegates search to Rust engine
+├── gamestate.py            # Game rules, move generation, make/undo moves
+├── config.py               # Board size, window dimensions, constants
+├── pieces.py               # Piece definitions, movement patterns, values
+├── utils.py                # Coordinate conversion, formatting helpers
+├── gui.py                  # Pygame GUI — board rendering, interaction
+├── main.py                 # Main entry point — game loop, event handling
+├── thread_utils.py         # Background threads for AI & hint calculation
+├── play_online.py          # Chess.com bot (Playwright browser automation)
+├── precalc_openings.py     # Deep opening precalculation (depth 10)
+├── requirements.txt        # Python dependencies
+│
+├── engine_rs/              # Rust search engine (PyO3 → minichess_engine)
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs          # PyO3 bindings (Python ↔ Rust interface)
+│       ├── search.rs       # Alpha-beta, PVS, LMR, null-move, quiescence
+│       ├── eval.rs         # Position evaluation function
+│       ├── gamestate.rs    # Board representation & move generation (Rust)
+│       ├── types.rs        # Shared types and constants
+│       ├── cache.rs        # SQLite move cache integration
+│       └── zobrist.rs      # Zobrist hashing for transposition table
+│
+├── engine/
+│   └── env.py              # RL environment wrapper (for NN training)
+│
+├── nn/                     # Neural network experiments
+│   ├── model.py            # PolicyValueNet (PyTorch CNN)
+│   └── mcts.py             # Monte Carlo Tree Search
+│
+├── src/
+│   ├── self_play.py        # Self-play training mode (20% exploration)
+│   └── scheduled_self_play.py  # Scheduled training with logging
+│
+├── tests/
+│   ├── test_ai_optimization.py  # Undo/redo, move validation tests
+│   └── test_nightly.py          # DB schema, cache verification tests
+│
+├── assets/sprites/         # Chess piece images (PNG)
+│
+├── docs/
+│   ├── ARCHITECTURE.md     # This file
+│   ├── IMPROVEMENTS.md     # Future improvement roadmap
+│   └── evaluation_strategy.md  # Detailed evaluation function docs
+│
+├── play.sh                 # Launch local GUI game
+├── train.sh                # Launch self-play training
+├── bot_start.sh            # Start chess.com bot
+├── bot_stop.sh             # Stop chess.com bot
+├── autorun_training.sh     # Automated training launcher
+├── check_training_health.sh # Training health monitor
+├── monitor_bot.sh          # Bot status monitor
+├── training_dashboard.sh   # Training metrics dashboard
+├── minichesstrain.service  # Systemd service (daily training)
+└── minichesstrain.timer    # Systemd timer (00:00 UTC trigger)
 ```
 
-## AI Engine (`ai.py`)
+## AI Engine (`ai.py` → `engine_rs/`)
+
+The Python `ai.py` is a thin wrapper that delegates all heavy computation to
+the Rust `minichess_engine` module (compiled via PyO3 from `engine_rs/`).
 
 ### Search Algorithm
 

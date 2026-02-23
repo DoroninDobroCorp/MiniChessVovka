@@ -2,20 +2,21 @@
 
 # --- Game Constants ---
 BOARD_SIZE = 6
-SQUARE_SIZE = 90  # Увеличим размер клетки для лучшей видимости
+SQUARE_SIZE = 100  # Увеличенный размер клетки для красоты
 TOTAL_WIDTH = BOARD_SIZE * SQUARE_SIZE  # Общая ширина доски
-SIDE_PANEL_WIDTH = 320  # Увеличим боковую панель
-INFO_HEIGHT = 200  # Увеличим высоту информационной панели
+SIDE_PANEL_WIDTH = 300  # Боковая панель
+INFO_HEIGHT = 0  # Не используется (всё в боковой панели)
 WIDTH = TOTAL_WIDTH + SIDE_PANEL_WIDTH  # Общая ширина окна
-HEIGHT = TOTAL_WIDTH + INFO_HEIGHT  # Общая высота окна включая информационную панель
+HEIGHT = TOTAL_WIDTH  # Высота = доска
 FPS = 30
+AI_MOVE_DELAY = 1.5  # Задержка перед ходом ИИ (секунды) — чтобы видеть ходы
 
 # --- Colors ---
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
-LIGHT_SQUARE = (238, 238, 210)
-DARK_SQUARE = (118, 150, 86)
-INFO_BG_COLOR = (49, 46, 43)
+LIGHT_SQUARE = (240, 217, 181)
+DARK_SQUARE = (181, 136, 99)
+INFO_BG_COLOR = (38, 36, 33)
 INFO_TEXT_COLOR = WHITE
 BUTTON_COLOR = (70, 70, 70)
 BUTTON_HOVER_COLOR = (100, 100, 100)
@@ -23,29 +24,31 @@ BUTTON_TEXT_COLOR = WHITE
 
 # --- UI Colors ---
 BOARD_COLORS = {
-    'light': (238, 238, 210),
-    'dark': (118, 150, 86)
+    'light': (240, 217, 181),
+    'dark': (181, 136, 99)
 }
 HIGHLIGHT_COLORS = {
-    'selected': (100, 150, 255, 150), # Semi-transparent blue
-    'legal_move': (0, 255, 0, 100), # Semi-transparent green (for dots/rings)
-    'check': (255, 0, 0, 120), # Semi-transparent red
-    'previous_move': (255, 255, 0, 100), # Semi-transparent yellow
-    'move_origin': (200, 200, 0, 80), # Fainter yellow for origin
-    'undo': (200, 100, 0), # Orange-ish for undo button
-    'toggle_ai': (80, 80, 80), # Dark gray for AI toggle
-    'toggle_ai_active': (50, 150, 50), # Greenish for active AI toggle
-    'trainer': (0, 150, 150), # Teal color for trainer button
-    'hint': (255, 150, 210, 200),        # Розовый для подсказки
-    'hint_hover': (220, 150, 120),       # Цвет при наведении на кнопку подсказки
-    'hint_active': (255, 190, 160),      # Цвет при нажатии на кнопку подсказки
-    'button': (80, 140, 200),            # Цвет для кнопок
-    'button_hover': (100, 160, 220),     # Цвет при наведении на кнопку
-    'button_active': (120, 180, 240),    # Цвет при нажатии на кнопку
-    'button_text': (255, 255, 255),      # Цвет текста кнопок
-    'undo_hover': (170, 140, 240),       # Цвет при наведении на кнопку отмены
-    'undo_active': (190, 160, 255),      # Цвет при нажатии на кнопку отмены
-    'toggle_ai_hover': (140, 220, 170)  # Цвет при наведении на кнопку переключения ИИ
+    'selected': (100, 150, 255, 150),
+    'legal_move': (0, 0, 0, 60),
+    'check': (235, 50, 50, 160),
+    'previous_move': (255, 255, 0, 80),
+    'move_origin': (200, 200, 0, 60),
+    'undo': (180, 80, 40),
+    'toggle_ai': (70, 70, 80),
+    'toggle_ai_active': (46, 139, 87),
+    'trainer': (0, 150, 150),
+    'hint': (130, 80, 220),
+    'hint_active': (170, 120, 255),
+    'hint_from': (80, 200, 255, 140),
+    'hint_to': (80, 255, 140, 160),
+    'hint_arrow': (80, 200, 255, 200),
+    'button': (80, 140, 200),
+    'button_hover': (100, 160, 220),
+    'button_active': (120, 180, 240),
+    'button_text': (255, 255, 255),
+    'undo_hover': (170, 140, 240),
+    'undo_active': (190, 160, 255),
+    'toggle_ai_hover': (140, 220, 170)
 }
 
 # Прозрачный цвет для возможных ходов

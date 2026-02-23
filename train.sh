@@ -22,4 +22,4 @@ if [ -d "venv" ]; then
 fi
 
 # Запускаем режим самообучения
-python3 self_play.py
+python3 src/self_play.py

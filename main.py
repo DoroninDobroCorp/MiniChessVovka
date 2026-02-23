@@ -7,50 +7,36 @@ import random
 import time
 import math
 import threading
-from collections import Counter # Keep if needed, maybe for eval? Not currently used.
+from collections import Counter
 
 # Import from project files
-from config import * # Constants, Colors, Sizes
-from pieces import * # Piece data
-from utils import * # Helper functions
-from gamestate import GameState # Core game logic class
-from gui import * # All drawing functions and GUI helpers
-import ai # <<< Меняем импорт, чтобы иметь доступ к ai.load/save
-# from mate_trainer import MateTrainer # Тренажёр
-# from ai import * # AI functions (needed for direct calls?) - find_best_move is in thread
-from thread_utils import AIThread # AI thread class
-
-# --- Global Variables / State ---
-# show_hint is modified here and read in gui.py
-# show_hint = False
-# hint_move is calculated by hint thread and read here/in gui.py
-# hint_move = None
+from config import *
+from pieces import *
+from utils import *
+from gamestate import GameState
+from gui import *
+import ai
+from thread_utils import AIThread, HintThread
 
 
 # --- Main Loop ---
 def main():
     """Основная функция игры"""
-    # global show_hint, hint_move # Declare modification of globals
 
     # <<< 1. Загружаем КЭШ ХОДОВ из БД при старте >>>
-    # print(f"Attributes in ai module: {dir(ai)}") # <<< Удаляем отладочный print
-    ai.load_move_cache_from_db() # <<< Используем новую функцию
+    ai.load_move_cache_from_db()
 
     print("Запуск main()")
-    # Pygame init is already called in gui.py for fonts
-    # pygame.init()
 
     # Инициализация экрана
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Мини Шахматы - Crazyhouse 6x6")
+    pygame.display.set_caption("Mini Crazyhouse 6×6")
     print("Окно создано")
 
-    # Загрузка изображений (Function is in gui.py)
+    # Загрузка изображений
     try:
-        if not load_images(): 
+        if not load_images():
             print("КРИТИЧЕСКАЯ ОШИБКА: Не удалось загрузить изображения фигур!")
-            print("Убедитесь, что следующие файлы находятся в корневой папке проекта:")
-            print("  - pawn.png, horse.png, bishop.png, rookie.png, king.png")
             pygame.quit()
             sys.exit(1)
         print("Изображения загружены")
@@ -63,19 +49,24 @@ def main():
 
     # Инициализация игры
     gamestate = GameState()
-    gamestate.setup_initial_board() # Sets up board and saves initial state
+    gamestate.setup_initial_board()
     print("Игра инициализирована")
 
     clock = pygame.time.Clock()
 
-    # Переменные для ИИ
+    # AI state
     making_ai_move = False
     ai_thread = None
+    ai_move_ready_time = None  # When AI finished — delay before executing
 
-    # Для хинтов
-    # hint_thread = None
-    # hint_thread_active = False
-    # last_hint_position_hash = None # Hash of position for which hint was calculated
+    # Hint state
+    show_hint = False
+    hint_move = None
+    hint_thread = None
+    hint_position_hash = None  # Track which position the hint is for
+
+    # Board orientation (manual toggle only, no auto-flip)
+    board_flipped = False
 
     running = True
     print("Начинаем игровой цикл")
@@ -87,52 +78,86 @@ def main():
         ai_thread = AIThread(gamestate, gamestate.ai_depth)
         ai_thread.start()
 
+    def start_hint_if_needed():
+        """Start hint calculation for current position if hints are enabled."""
+        nonlocal hint_thread, hint_move, hint_position_hash
+        if not show_hint:
+            return
+        # Don't hint during AI turns or game-over
+        is_current_ai = (gamestate.current_turn == 'w' and gamestate.white_ai_enabled) or \
+                        (gamestate.current_turn == 'b' and gamestate.black_ai_enabled)
+        if is_current_ai or gamestate.checkmate or gamestate.stalemate:
+            hint_move = None
+            return
+        try:
+            pos_hash = ai.get_position_hash(gamestate)
+        except Exception:
+            pos_hash = None
+        if pos_hash == hint_position_hash and hint_move is not None:
+            return  # Already have hint for this position
+        hint_move = None
+        hint_position_hash = pos_hash
+        if hint_thread and hint_thread.is_alive():
+            pass  # Let old thread finish, will be overwritten
+        hint_thread = HintThread(gamestate, depth=gamestate.ai_depth)
+        hint_thread.start()
+
+    start_hint_if_needed()
+
     while running:
         current_time = time.time()
-        mouse_pos = pygame.mouse.get_pos()
 
-        # <<< Определяем, нужно ли переворачивать доску >>>
-        board_flipped = (gamestate.current_turn == 'b' and not gamestate.black_ai_enabled)
+        # Draw everything
+        screen.fill(INFO_BG_COLOR)
+        ui_elements = draw_game_state(screen, gamestate, board_flipped=board_flipped,
+                                       show_hint=show_hint, hint_move=hint_move)
+        pygame.display.flip()
 
-        # We need ui_elements early for event processing
-        # Draw everything first to get the rects, then process events for that frame
-        screen.fill(INFO_BG_COLOR) # Fill background before drawing
-        # <<< Передаем флаг board_flipped в функцию отрисовки >>>
-        ui_elements = draw_game_state(screen, gamestate, board_flipped=board_flipped) # Draw and get all UI rects
-        pygame.display.flip() # Display the drawn frame
+        # --- Check hint thread completion ---
+        if hint_thread and hint_thread.done:
+            hint_move = hint_thread.best_move
+            hint_thread = None
 
-        # --- Handle AI Move Completion ---
+        # --- Handle AI Move Completion (with delay) ---
         if making_ai_move and ai_thread and ai_thread.done:
-            print("AI thread finished calculation.")
-            ai_best_move = ai_thread.best_move
-            ai_thread = None
-            making_ai_move = False # Stop blocking input
+            if ai_move_ready_time is None:
+                ai_move_ready_time = current_time  # Mark when AI finished
+            
+            # Wait AI_MOVE_DELAY seconds before executing
+            if current_time - ai_move_ready_time >= AI_MOVE_DELAY:
+                print("AI thread finished calculation.")
+                ai_best_move = ai_thread.best_move
+                ai_thread = None
+                making_ai_move = False
+                ai_move_ready_time = None
 
-            if ai_best_move:
-                print(f"AI making move: {format_move_for_print(ai_best_move)}")
-                move_success = gamestate.make_move(ai_best_move)
-            else:
-                print("!!! AI returned None - selecting random legal move as fallback")
-                legal_moves = gamestate.get_all_legal_moves()
-                if legal_moves:
-                    ai_best_move = random.choice(legal_moves)
-                    print(f"AI fallback move: {format_move_for_print(ai_best_move)}")
+                if ai_best_move:
+                    print(f"AI making move: {format_move_for_print(ai_best_move)}")
                     move_success = gamestate.make_move(ai_best_move)
                 else:
-                    print("!!! No legal moves available - game should be over")
-                    move_success = False
+                    print("!!! AI returned None - selecting random legal move as fallback")
+                    legal_moves = gamestate.get_all_legal_moves()
+                    if legal_moves:
+                        ai_best_move = random.choice(legal_moves)
+                        print(f"AI fallback move: {format_move_for_print(ai_best_move)}")
+                        move_success = gamestate.make_move(ai_best_move)
+                    else:
+                        print("!!! No legal moves available - game should be over")
+                        move_success = False
 
-            if move_success:
-                if gamestate.needs_promotion_choice:
-                    print("!!! AI move resulted in promotion choice needed - AI should have chosen!")
-                    prom_char = 'R' if get_opposite_color(gamestate.current_turn) == 'w' else 'r'
-                    gamestate.complete_promotion(prom_char)
-                gamestate.save_state()
-                print("AI move successful.")
-                # <<< 2. Сохраняем КЭШ ХОДОВ в БД после успешного хода ИИ >>>
-                ai.save_move_cache_to_db(ai.move_cache) # <<< Используем новую функцию и переменную
-            else:
-                print(f"!!! Error executing AI move: {format_move_for_print(ai_best_move)}")
+                if move_success:
+                    if gamestate.needs_promotion_choice:
+                        prom_char = 'R' if get_opposite_color(gamestate.current_turn) == 'w' else 'r'
+                        gamestate.complete_promotion(prom_char)
+                    gamestate.save_state()
+                    print("AI move successful.")
+                    ai.save_move_cache_to_db(ai.move_cache)
+                    # Recalculate hint for new position
+                    hint_move = None
+                    hint_position_hash = None
+                    start_hint_if_needed()
+                else:
+                    print(f"!!! Error executing AI move: {format_move_for_print(ai_best_move)}")
 
         # --- Handle Pygame Events ---
         clicked_button_info = None
@@ -146,35 +171,30 @@ def main():
                 print("Quit event received.")
                 if ai_thread and ai_thread.is_alive(): print("Waiting for AI thread...")
 
-            # Process clicks only if AI is not currently calculating its move
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 and not making_ai_move:
-                 mouse_pos = event.pos # Use event's position for click
+                 mouse_pos = event.pos
 
-                 # --- Check standard UI buttons --- 
+                 # --- Check standard UI buttons ---
                  clicked_button_info = None
-                 # Use the buttons rects returned by draw_game_state via ui_elements
                  if 'buttons' in ui_elements:
                      for name, rect in ui_elements['buttons'].items():
                          if rect.collidepoint(mouse_pos):
                              clicked_button_info = name
                              break
-                 if clicked_button_info: continue # Handle below event loop
+                 if clicked_button_info: continue
 
-                 # --- Check promotion choice buttons --- 
+                 # --- Check promotion choice buttons ---
                  clicked_promotion_choice = None
                  if gamestate.needs_promotion_choice and 'promotion_buttons' in ui_elements:
-                     # Use handle_promotion_choice which iterates through the dict
                      clicked_promotion_choice = handle_promotion_choice(mouse_pos, ui_elements['promotion_buttons'])
-                     if clicked_promotion_choice: continue # Handle below
+                     if clicked_promotion_choice: continue
 
-                 # --- Check click on board --- 
+                 # --- Check click on board ---
                  clicked_square = None
                  if mouse_pos[0] < TOTAL_WIDTH and mouse_pos[1] < TOTAL_WIDTH:
-                     # Получаем "экранные" координаты клетки
                      screen_col = mouse_pos[0] // SQUARE_SIZE
                      screen_row = mouse_pos[1] // SQUARE_SIZE
 
-                     # <<< Пересчитываем в логические координаты, если доска перевернута >>>
                      if board_flipped:
                          logical_row = BOARD_SIZE - 1 - screen_row
                          logical_col = BOARD_SIZE - 1 - screen_col
@@ -183,60 +203,71 @@ def main():
                          logical_col = screen_col
 
                      clicked_square = (logical_row, logical_col)
-                     # Don't continue yet, need to check hand piece click first or handle board click
-                     # if gamestate.selected_drop_piece: continue # Drop target handled below
-                     # else: continue # Board selection handled below
 
-                 # --- Check click on hand piece --- 
+                 # --- Check click on hand piece ---
                  clicked_hand_piece_type = None
-                 # Pass the hand_pieces rects from ui_elements to the checking function
                  if 'hand_pieces' in ui_elements:
                       clicked_hand_piece_type = get_clicked_hand_piece(mouse_pos, gamestate, ui_elements['hand_pieces'])
                       if clicked_hand_piece_type:
-                           continue # Handle hand piece click below
+                           continue
 
-                 # If we reach here and clicked_square is set, it's a board click (not button/hand/promo)
-                 if clicked_square: continue # Handle board click below
+                 if clicked_square: continue
 
 
         # --- Process Clicks and Game Logic (Outside Event Loop) ---
+
+        def after_player_move():
+            """Common logic after a successful player move."""
+            nonlocal making_ai_move, ai_thread, hint_move, hint_position_hash
+            hint_move = None
+            hint_position_hash = None
+            if not (gamestate.checkmate or gamestate.stalemate):
+                 is_next_player_ai = (gamestate.current_turn == 'w' and gamestate.white_ai_enabled) or \
+                                     (gamestate.current_turn == 'b' and gamestate.black_ai_enabled)
+                 if is_next_player_ai:
+                      making_ai_move = True
+                      ai_thread = AIThread(gamestate, gamestate.ai_depth)
+                      ai_thread.start()
+                 else:
+                      start_hint_if_needed()
 
         # Handle Button Clicks
         if clicked_button_info and not making_ai_move:
             print(f"Button clicked: {clicked_button_info}")
             if clicked_button_info == 'undo_button':
-                # --- Новая логика: отменяем два полухода --- 
-                print("Attempting to undo two half-moves (AI's then Player's)...")
-                undone_ai_move = gamestate.undo_move() # Пытаемся отменить ход ИИ
+                print("Attempting to undo two half-moves...")
+                undone_ai_move = gamestate.undo_move()
                 if undone_ai_move:
                     print("Successfully undid AI's move.")
-                    undone_player_move = gamestate.undo_move() # Пытаемся отменить ход игрока
+                    undone_player_move = gamestate.undo_move()
                     if undone_player_move:
                         print("Successfully undid Player's move. Your turn.")
-                        # Убедимся, что ИИ не начнет ходить сразу
                         making_ai_move = False
-                        if ai_thread: # Останавливаем поток ИИ, если он вдруг активен
-                            # Попытка дождаться завершения потока (маловероятно, но для безопасности)
-                            try: ai_thread.join(timeout=0.1) 
-                            except: pass # Игнорируем ошибки при остановке
+                        if ai_thread:
+                            try: ai_thread.join(timeout=0.1)
+                            except: pass
                             ai_thread = None
+                        hint_move = None
+                        hint_position_hash = None
+                        start_hint_if_needed()
                     else:
-                        print("Could not undo Player's move (already at the start?). It remains AI's turn.")
-                        # В этой ситуации ИИ, вероятно, снова сделает ход.
+                        print("Could not undo Player's move.")
                 else:
                     print("Cannot undo any further.")
-                # --- Конец новой логики ---
             elif clicked_button_info == 'new_game_button':
                 print("Starting new game...")
-                gamestate.setup_initial_board() # Reset the game state
-                making_ai_move = False # Ensure AI isn't stuck thinking from previous game
-                if ai_thread: ai_thread = None # Clear AI thread just in case
-                # Check if AI should move first in the new game
+                gamestate.setup_initial_board()
+                making_ai_move = False
+                if ai_thread: ai_thread = None
+                hint_move = None
+                hint_position_hash = None
                 if gamestate.current_turn == 'b' and gamestate.black_ai_enabled:
                     print("AI Black to make the first move in new game.")
                     making_ai_move = True
                     ai_thread = AIThread(gamestate, gamestate.ai_depth)
                     ai_thread.start()
+                else:
+                    start_hint_if_needed()
             elif clicked_button_info == 'toggle_white_ai':
                  gamestate.white_ai_enabled = not gamestate.white_ai_enabled
                  print(f"White AI: {gamestate.white_ai_enabled}")
@@ -244,26 +275,32 @@ def main():
                       making_ai_move = True
                       ai_thread = AIThread(gamestate, gamestate.ai_depth)
                       ai_thread.start()
+                 hint_move = None
+                 hint_position_hash = None
+                 start_hint_if_needed()
             elif clicked_button_info == 'toggle_black_ai':
                  gamestate.black_ai_enabled = not gamestate.black_ai_enabled
                  print(f"Black AI: {gamestate.black_ai_enabled}")
-                 # If black's turn and AI is now enabled, trigger AI move
                  if gamestate.current_turn == 'b' and gamestate.black_ai_enabled and not making_ai_move:
                       making_ai_move = True
                       ai_thread = AIThread(gamestate, gamestate.ai_depth)
                       ai_thread.start()
-            # elif clicked_button_info == 'trainer_button': # <<< Убрано - нет тренажёра >>>
-            #     print("Запуск тренажёра...")
-            #     # <<< Передаем screen и загруженные изображения >>>
-            #     trainer = MateTrainer(screen, PIECE_IMAGES)
-            #     trainer.run() # Запускаем тренажёр
-            #     # После выхода из тренажёра, основной цикл продолжит работу
-            #     print("Выход из тренажёра.")
-            #     # <<< Перерисовываем основной экран после выхода из тренажера >>>
-            #     # Это нужно, так как тренажер мог изменить содержимое экрана
-            #     screen.fill(INFO_BG_COLOR)
-            #     ui_elements = draw_game_state(screen, gamestate)
-            #     pygame.display.flip()
+                 hint_move = None
+                 hint_position_hash = None
+                 start_hint_if_needed()
+            elif clicked_button_info == 'toggle_hint':
+                 show_hint = not show_hint
+                 print(f"Hints: {'ON' if show_hint else 'OFF'}")
+                 if show_hint:
+                     hint_move = None
+                     hint_position_hash = None
+                     start_hint_if_needed()
+                 else:
+                     hint_move = None
+                     hint_position_hash = None
+            elif clicked_button_info == 'toggle_flip':
+                 board_flipped = not board_flipped
+                 print(f"Board flipped: {board_flipped}")
             clicked_button_info = None
 
         # Handle Promotion Choice Click
@@ -271,37 +308,25 @@ def main():
             print(f"Promotion choice made: {clicked_promotion_choice}")
             if gamestate.complete_promotion(clicked_promotion_choice):
                  gamestate.save_state()
-                 if not (gamestate.checkmate or gamestate.stalemate):
-                      is_next_player_ai = (gamestate.current_turn == 'w' and gamestate.white_ai_enabled) or \
-                                          (gamestate.current_turn == 'b' and gamestate.black_ai_enabled)
-                      if is_next_player_ai:
-                           making_ai_move = True
-                           ai_thread = AIThread(gamestate, gamestate.ai_depth)
-                           ai_thread.start()
+                 after_player_move()
             else:
                  print("Error completing promotion.")
             clicked_promotion_choice = None
 
         # Handle Hand Piece Click
         elif clicked_hand_piece_type and not making_ai_move:
-            # clicked_hand_piece_type is UPPERCASE 'N', 'P', etc.
-            # Construct the full piece code with color, e.g., 'wN', 'bP'
             full_piece_code = gamestate.current_turn + clicked_hand_piece_type
 
-            # Check if this specific piece code is already selected
             if gamestate.selected_drop_piece == full_piece_code:
-                gamestate.selected_drop_piece = None # Deselect
+                gamestate.selected_drop_piece = None
                 gamestate.highlighted_moves = []
-                print(f"Deselected drop piece: {full_piece_code}") # Use full code
+                print(f"Deselected drop piece: {full_piece_code}")
             else:
-                gamestate.selected_drop_piece = full_piece_code # Store the full code ('wN')
-                gamestate.selected_square = None # Deselect board square
-                print(f"Selected drop piece: {full_piece_code}") # Use full code
+                gamestate.selected_drop_piece = full_piece_code
+                gamestate.selected_square = None
+                print(f"Selected drop piece: {full_piece_code}")
                 gamestate.highlighted_moves = []
-                # drop_char = clicked_hand_piece_type if gamestate.current_turn == 'w' else piece_to_lower(clicked_hand_piece_type) # OLD logic
-                # Use the full_piece_code to find legal moves
                 for move in gamestate.get_all_legal_moves():
-                    # Move format: ('drop', 'wN', (r, f))
                     if move[0] == 'drop' and move[1] == full_piece_code:
                         gamestate.highlighted_moves.append(move)
             clicked_hand_piece_type = None
@@ -311,12 +336,8 @@ def main():
             r, f = clicked_square
             # Case 1: Drop move
             if gamestate.selected_drop_piece:
-                # selected_drop_piece now holds the full code ('wN', 'bP', etc.)
-                # drop_char = gamestate.selected_drop_piece if gamestate.current_turn == 'w' else piece_to_lower(gamestate.selected_drop_piece) # OLD logic
-                # Construct the move tuple using the stored full code
                 drop_move = ('drop', gamestate.selected_drop_piece, clicked_square)
                 is_legal_drop = False
-                # Compare against highlighted moves (which should now match format)
                 for legal_move in gamestate.highlighted_moves:
                     if is_same_move(drop_move, legal_move):
                         is_legal_drop = True
@@ -328,13 +349,7 @@ def main():
                         gamestate.selected_drop_piece = None
                         gamestate.highlighted_moves = []
                         print("Drop successful.")
-                        if not (gamestate.checkmate or gamestate.stalemate):
-                             is_next_player_ai = (gamestate.current_turn == 'w' and gamestate.white_ai_enabled) or \
-                                                 (gamestate.current_turn == 'b' and gamestate.black_ai_enabled)
-                             if is_next_player_ai:
-                                  making_ai_move = True
-                                  ai_thread = AIThread(gamestate, gamestate.ai_depth)
-                                  ai_thread.start()
+                        after_player_move()
                     else:
                         print("Drop failed.")
                 else:
@@ -356,13 +371,7 @@ def main():
                         if not gamestate.needs_promotion_choice:
                              gamestate.save_state()
                              print("Move successful.")
-                             if not (gamestate.checkmate or gamestate.stalemate):
-                                 is_next_player_ai = (gamestate.current_turn == 'w' and gamestate.white_ai_enabled) or \
-                                                     (gamestate.current_turn == 'b' and gamestate.black_ai_enabled)
-                                 if is_next_player_ai:
-                                      making_ai_move = True
-                                      ai_thread = AIThread(gamestate, gamestate.ai_depth)
-                                      ai_thread.start()
+                             after_player_move()
                         else:
                             print("Move requires promotion choice.")
                         gamestate.selected_square = None
@@ -410,7 +419,7 @@ def main():
              ai_thread = AIThread(gamestate, gamestate.ai_depth)
              ai_thread.start()
 
-        clock.tick(FPS) # Control frame rate
+        clock.tick(FPS)
 
     # --- End of Game Loop ---
     print("Exiting game loop.")

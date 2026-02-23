@@ -1,3 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+*.egg-info/
+
+# Database (runtime)
+move_cache.db
+move_cache.db.*
+
 # Training
 training_log.txt
 training.pid
@@ -8,18 +19,16 @@ training_progress.txt
 .chess_com_profile/
 .chess_com_chrome_state.json
 .bot_screenshots/
+.bot_heartbeat
 game_logs/
 .stop_after_game
 
-# Database backups
-move_cache.db.backup
-move_cache.db.bak_*
-move_cache.db.old
+# Backups
+*_backup*
+*.bak
 
-# Python
-__pycache__/
-*.pyc
-venv/
+# Rust build artifacts
+engine_rs/target/
 
 # OS
 .DS_Store
@@ -27,10 +36,6 @@ venv/
 # IDE
 .vscode/
 .idea/
-move_cache.db.pre_fix_backup
 
 # Logs
-monitor.log
-scheduler.log
-watchdog.log
 *.log

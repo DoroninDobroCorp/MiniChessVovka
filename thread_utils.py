@@ -31,3 +31,24 @@ class AIThread(threading.Thread):
             self.best_move = None
         finally:
             self.done = True
+
+
+class HintThread(threading.Thread):
+    """Background thread to calculate the best move hint for the current position."""
+    def __init__(self, gamestate, depth=8):
+        threading.Thread.__init__(self)
+        self.gamestate = copy.deepcopy(gamestate)
+        self.depth = depth
+        self.best_move = None
+        self.done = False
+        self.daemon = True
+        self.name = f"HintThread-{gamestate.current_turn}-{time.time():.0f}"
+
+    def run(self):
+        try:
+            self.best_move = find_best_move(self.gamestate, self.depth)
+        except Exception as e:
+            print(f"HintThread error: {e}")
+            self.best_move = None
+        finally:
+            self.done = True
