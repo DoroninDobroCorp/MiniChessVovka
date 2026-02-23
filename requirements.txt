@@ -3,3 +3,4 @@ torch>=2.0
 flask>=2.0
 typer>=0.7
 pygame>=2.1
+python-dotenv>=0.19.0

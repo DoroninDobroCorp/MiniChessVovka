@@ -17,11 +17,16 @@ training_progress.txt
 
 # Bot runtime
 .chess_com_profile/
-.chess_com_chrome_state.json
+.chess_com_profile_*/
+.chess_com_chrome_state*.json
 .bot_screenshots/
-.bot_heartbeat
+.bot_screenshots_*/
+.bot_heartbeat*
 game_logs/
 .stop_after_game
+
+# Environment & credentials
+.env
 
 # Backups
 *_backup*

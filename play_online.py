@@ -23,6 +23,13 @@ import copy
 from datetime import datetime
 from pathlib import Path
 
+# ── Load environment variables from .env if exists ──────────
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, will use env vars or CLI args
+
 # ── Playwright import ───────────────────────────────────────
 try:
     from playwright.sync_api import sync_playwright
@@ -41,14 +48,41 @@ from utils import coords_to_algebraic, format_move_for_print
 
 # ── Config ──────────────────────────────────────────────────
 CHESS_COM_URL = "https://www.chess.com"
-PROFILE_DIR = Path(__file__).parent / ".chess_com_profile"
-STATE_FILE = Path(__file__).parent / ".chess_com_chrome_state.json"
-OUTPUT_DIR = Path(__file__).parent / ".bot_screenshots"
-HEARTBEAT_FILE = Path(__file__).parent / ".bot_heartbeat"
 
-# Credentials (NOT committed — .gitignore should cover dotfiles)
-EMAIL = "***REMOVED***"
-PASSWORD = "***REMOVED***"
+def _parse_account_args():
+    """Parse --email, --password, --account from sys.argv (before argparse)."""
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    # Credentials from CLI args > env vars
+    parser.add_argument('--email', default=os.getenv('CHESS_COM_EMAIL'))
+    parser.add_argument('--password', default=os.getenv('CHESS_COM_PASSWORD'))
+    parser.add_argument('--account', default=None, help='Account tag for separate profile dirs')
+    parser.add_argument('--auto', action='store_true')
+    args, _ = parser.parse_known_args()
+    
+    # Validate credentials are provided
+    if not args.email or not args.password:
+        print("❌ Chess.com credentials not provided!")
+        print("   Set CHESS_COM_EMAIL and CHESS_COM_PASSWORD in .env file")
+        print("   OR pass --email and --password as CLI arguments")
+        print("\n   Example .env file:")
+        print("   CHESS_COM_EMAIL=your-email@gmail.com")
+        print("   CHESS_COM_PASSWORD=your-password")
+        sys.exit(1)
+    
+    return args
+
+_acct = _parse_account_args()
+_acct_suffix = f"_{_acct.account}" if _acct.account else ""
+
+PROFILE_DIR = Path(__file__).parent / f".chess_com_profile{_acct_suffix}"
+STATE_FILE = Path(__file__).parent / f".chess_com_chrome_state{_acct_suffix}.json"
+OUTPUT_DIR = Path(__file__).parent / f".bot_screenshots{_acct_suffix}"
+HEARTBEAT_FILE = Path(__file__).parent / f".bot_heartbeat{_acct_suffix}"
+
+# Credentials from args (which loaded from env or CLI)
+EMAIL = _acct.email
+PASSWORD = _acct.password
 
 CHROME_PATHS = [
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -1714,8 +1748,7 @@ def run_auto_session():
 
 def main():
     """Entry point — supports --auto for fully autonomous mode."""
-    import sys
-    auto_mode = '--auto' in sys.argv
+    auto_mode = _acct.auto
 
     print("╔══════════════════════════════════════════════╗")
     print("║   MiniChess Bot — chess.com/minihouse        ║")

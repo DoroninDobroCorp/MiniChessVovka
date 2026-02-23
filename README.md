@@ -61,7 +61,11 @@ python main.py
 ### Chess.com Bot
 
 ```bash
-# Start bot (casual mode)
+# 1. Create .env file with your credentials
+cp .env.example .env
+# Edit .env and add your chess.com email/password
+
+# 2. Start bot (casual mode)
 ./bot_start.sh casual
 
 # Start bot (rated mode)
