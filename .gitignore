@@ -44,3 +44,17 @@ engine_rs/target/
 
 # Logs
 *.log
+
+# Article drafts & screenshots
+habr*
+*_consolidated.md
+
+# Screenshots in root
+top1_*.jpg
+win_of_*.jpg
+
+# Factory / CI agent hooks
+.factory/
+
+# Pytest
+.pytest_cache/

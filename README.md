@@ -1,175 +1,153 @@
-# ♟️ MiniChess — 6×6 Crazyhouse Engine
+<div align="center">
 
-A high-performance 6×6 **Crazyhouse** chess engine with a Rust-accelerated search backend, Pygame GUI, and a chess.com automation bot.
+# ♟️ MiniChess
 
-> **Crazyhouse** = captured pieces go to your "hand" and can be dropped back onto the board on any empty square.
+**A Rust-powered 6×6 Crazyhouse chess engine**
 
-## ✨ Features
+*Alpha-beta search · PyO3 bindings · Self-play training · Chess.com bot*
 
-- **Rust-powered search** — Alpha-beta with PVS, LMR, null-move pruning, quiescence search, and Zobrist hashing via [PyO3](https://pyo3.rs)
-- **Iterative deepening** — depth 8–10 with parallel workers for strong play
-- **Transposition table** — 4M entries with best-move caching across sessions (SQLite)
-- **Crazyhouse-specific eval** — hand piece valuation, drop threats, king safety tuned for drops
-- **Pygame GUI** — interactive board with undo, hints, AI toggle
-- **Chess.com bot** — browser automation (Playwright) for minihouse games
-- **Self-play training** — builds opening book via self-play with 20% exploration
+[![Rust](https://img.shields.io/badge/Engine-Rust-b7410e?logo=rust&logoColor=white)](engine_rs/)
+[![PyO3](https://img.shields.io/badge/Bindings-PyO3-3776ab?logo=python&logoColor=white)](https://pyo3.rs)
+[![License](https://img.shields.io/badge/License-Private-grey)]()
 
-## 🚀 Quick Start
+</div>
+
+---
+
+> **Crazyhouse** — captured pieces go to your "hand" and can be dropped back onto the board on any empty square. This engine plays a 6×6 variant.
+
+## Engine Highlights
+
+The core engine is written in **Rust** (~3 300 LOC) and exposed to Python via [PyO3](https://pyo3.rs):
+
+| Module | LOC | Role |
+|--------|-----|------|
+| [`search.rs`](engine_rs/src/search.rs) | 1 011 | Parallel alpha-beta with PVS, LMR, null-move pruning, aspiration windows |
+| [`gamestate.rs`](engine_rs/src/gamestate.rs) | 755 | Full move generation for 6×6 Crazyhouse (incl. drops) |
+| [`eval.rs`](engine_rs/src/eval.rs) | 440 | Crazyhouse-tuned evaluation (material, king safety, drops) |
+| [`types.rs`](engine_rs/src/types.rs) | 331 | Board representation and core types |
+| [`cache.rs`](engine_rs/src/cache.rs) | 96 | SQLite-backed transposition table (4M entries) |
+| [`zobrist.rs`](engine_rs/src/zobrist.rs) | 74 | Position hashing |
+
+### Search Features
+
+- **Iterative deepening** (depth 1 → 10) with aspiration windows
+- **Parallel search** — root moves fanned out to worker threads via Rayon
+- **PVS + LMR** — Principal Variation Search with Late Move Reduction
+- **Quiescence search** — captures, promotions, and tactical drops near enemy king
+- **Null-move pruning** — automatically disabled when opponent holds pieces in hand
+- **Transposition table** — Zobrist hashing, 4M entries, persisted to SQLite across sessions
+
+### Evaluation
+
+| Factor | Details |
+|--------|---------|
+| Material | P=100 · N=320 · B=330 · R=500 · Q=900 · K=20 000 |
+| Hand pieces | Valued 60–100 % higher than on-board (instant deployment) |
+| King safety | Pawn shield +55/pawn, exposed king up to −390 penalty |
+| Center control | +12 inner center, +6 extended center |
+| Drop threats | Progressive bonus scaling with pieces in hand |
+
+> Full writeup → [`docs/evaluation_strategy.md`](docs/evaluation_strategy.md)
+
+## Quick Start
 
 ### Prerequisites
 
-- Python 3.11+
-- Rust toolchain (for building the engine)
+- **Rust** toolchain (`rustup`)
+- Python 3.11+ (for GUI & bot)
 
-### Setup
+### Build & Run
 
 ```bash
-# Clone and enter project
 git clone <repo-url> && cd MiniChess
 
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Build Rust engine
+# Build the Rust engine
 cd engine_rs
 pip install maturin
 maturin develop --release
 cd ..
-```
 
-### Play
+# Install Python deps
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
-```bash
-# Launch the GUI
+# Play!
 ./play.sh
-
-# Or directly:
-python main.py
 ```
 
-### Train (Self-Play)
+### Self-Play Training
 
 ```bash
-# Run self-play training (Ctrl+C to stop gracefully)
-./train.sh
+./train.sh          # Ctrl+C to stop gracefully
 ```
 
 ### Chess.com Bot
 
-**Prerequisites:**
-- Chess.com account
-- Playwright and Chromium installed
-
-**Setup:**
 ```bash
-# 1. Install bot dependencies
+cp .env.example .env   # add your credentials
 pip install -r requirements.txt
 python -m playwright install chromium
 
-# 2. Configure credentials
-cp .env.example .env
-nano .env  # Add your chess.com email and password
-```
-
-**Run:**
-```bash
-# Start bot in casual mode (recommended for testing)
-./bot_start.sh casual
-
-# Start bot in rated mode
-./bot_start.sh rated
-
-# Stop bot
+./bot_start.sh casual  # or: rated
 ./bot_stop.sh
-
-# Monitor bot activity
 ./monitor_bot.sh
 ```
 
-**Note:** The bot uses browser automation to play games on chess.com. Make sure you comply with chess.com's Terms of Service.
+> ⚠️ Make sure you comply with chess.com's Terms of Service.
 
-## 🏗️ Architecture
+## Architecture
 
 ```
-ai.py  ──→  minichess_engine (Rust/PyO3)
-  │              ├── search.rs    — parallel alpha-beta + quiescence
-  │              ├── eval.rs      — position evaluation
-  │              ├── gamestate.rs — move generation
-  │              ├── cache.rs     — SQLite move cache
-  │              └── zobrist.rs   — position hashing
-  │
-  ├── gamestate.py  — Python game rules & state management
-  ├── gui.py        — Pygame board rendering
-  ├── main.py       — game loop & event handling
-  └── play_online.py — chess.com browser bot
+                    ┌──────────────────────────────┐
+                    │   minichess_engine (Rust)     │
+                    │                              │
+  ai.py ──PyO3──▶  │  search.rs ◄── eval.rs       │
+                    │      │           │            │
+                    │  gamestate.rs  zobrist.rs     │
+                    │      │                       │
+                    │  cache.rs (SQLite)            │
+                    └──────────────────────────────┘
+                              ▲
+      ┌───────────────────────┼────────────────────┐
+      │                       │                    │
+  main.py + gui.py      play_online.py       self_play.py
+  (Pygame GUI)          (Chess.com bot)      (Training)
 ```
 
-### Search Algorithm
+## Project Layout
 
-1. **Iterative deepening** (depth 1→10) with aspiration windows
-2. **Parallel search** — fan out root moves to worker threads
-3. **Alpha-beta + PVS** — Principal Variation Search with Late Move Reduction
-4. **Quiescence search** — captures, promotions, and tactical drops near enemy king
-5. **Null-move pruning** — disabled when opponent has pieces in hand (crazyhouse safety)
-6. **Transposition table** — Zobrist hashing, 4M entries, persisted to SQLite
+```
+engine_rs/              ← Rust engine (core)
+  src/
+    search.rs           — parallel alpha-beta + quiescence
+    eval.rs             — position evaluation
+    gamestate.rs        — move generation & board state
+    types.rs            — core types & board representation
+    cache.rs            — SQLite transposition table
+    zobrist.rs          — position hashing
+    lib.rs              — PyO3 module entry point
 
-### Evaluation (Crazyhouse-Tuned)
+*.py                    ← Python layer (GUI, bot, training)
+  ai.py                 — AI wrapper delegating to Rust
+  gamestate.py          — game rules & state management
+  gui.py                — Pygame board rendering
+  main.py               — game loop entry point
+  play_online.py        — chess.com browser bot
+  config.py / pieces.py / utils.py
 
-| Factor | Notes |
-|--------|-------|
-| Material | P=100, N=320, B=330, R=500, Q=900, K=20000 |
-| Hand pieces | Valued 60–100% higher than on-board (instant deployment) |
-| King safety | Pawn shield +55/pawn, exposed king up to −390 penalty |
-| Center control | +12 inner center, +6 extended center |
-| Passed pawns | Conservative (opponent can drop blockers) |
-| Drop threats | Progressive bonus scaling with pieces in hand |
+docs/                   ← Documentation
+tests/                  ← Test suite
+```
 
-> Full evaluation details in [`docs/evaluation_strategy.md`](docs/evaluation_strategy.md)
+## Documentation
 
-## 📁 Project Structure
+| Doc | Content |
+|-----|---------|
+| [Architecture](docs/ARCHITECTURE.md) | System design & component interactions |
+| [Evaluation Strategy](docs/evaluation_strategy.md) | Detailed scoring heuristics |
+| [Improvement Roadmap](docs/IMPROVEMENTS.md) | Planned enhancements |
 
-| Path | Description |
-|------|-------------|
-| `ai.py` | AI wrapper — delegates to Rust engine |
-| `gamestate.py` | Game rules, move generation, make/undo |
-| `gui.py` | Pygame GUI rendering |
-| `main.py` | Game loop entry point |
-| `config.py` | Constants (board size, colors, dimensions) |
-| `pieces.py` | Piece definitions & movement patterns |
-| `utils.py` | Coordinate conversion helpers |
-| `thread_utils.py` | Background threads for AI & hints |
-| `play_online.py` | Chess.com browser bot (Playwright) |
-| `precalc_openings.py` | Opening position precalculator |
-| `engine_rs/` | Rust search engine (PyO3) |
-| `engine/env.py` | RL environment wrapper |
-| `nn/` | Neural network experiments (MCTS + CNN) |
-| `src/` | Training scripts (self-play, scheduled) |
-| `tests/` | Test suite |
-| `docs/` | Architecture & strategy documentation |
-| `assets/sprites/` | Chess piece images |
-
-## 📖 Documentation
-
-- [Architecture & Design](docs/ARCHITECTURE.md)
-- [Evaluation Strategy](docs/evaluation_strategy.md)
-- [Improvement Roadmap](docs/IMPROVEMENTS.md)
-
-## 🛠️ Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `play.sh` | Launch GUI game |
-| `train.sh` | Start self-play training |
-| `bot_start.sh` | Start chess.com bot |
-| `bot_stop.sh` | Stop chess.com bot |
-| `check_training_health.sh` | Monitor training status |
-| `training_dashboard.sh` | Training metrics dashboard |
-| `monitor_bot.sh` | Bot activity monitor |
-
-## 📝 License
+## License
 
 Private project.
