@@ -1,3 +1,9 @@
+🇬🇧 [English](#-english) | 🇷🇺 [Русский](#-русский)
+
+---
+
+# 🇬🇧 English
+
 <div align="center">
 
 # ♟️ MiniChess
@@ -175,5 +181,189 @@ Private project.
 <div align="center">
 
 *Built with 🦀 Rust + 🐍 Python + ☕ lots of coffee*
+
+</div>
+
+---
+
+# 🇷🇺 Русский
+
+<div align="center">
+
+# ♟️ MiniChess
+
+**Шахматный движок для 6×6 Crazyhouse на Rust, занявший 1-е место в мире 🏆**
+
+*Alpha-beta поиск · PyO3 привязки · Обучение через самоигру · Бот для Chess.com*
+
+[![Rust](https://img.shields.io/badge/Engine-Rust-b7410e?logo=rust&logoColor=white)](engine_rs/)
+[![PyO3](https://img.shields.io/badge/Bindings-PyO3-3776ab?logo=python&logoColor=white)](https://pyo3.rs)
+[![License](https://img.shields.io/badge/License-Private-grey)]()
+
+<br>
+
+<img src="assets/screenshots/top1.jpg" width="420" alt="MiniChess — №1 в мире" />
+
+*☝️ Да, это первое место в рейтинге minihouse на Chess.com*
+
+</div>
+
+---
+
+> 🤯 **Crazyhouse** — взятые фигуры попадают в «руку» и могут быть выставлены обратно на доску на любое свободное поле. Этот движок играет в вариант 6×6 («minihouse»).
+
+## 🏆 Результаты
+
+Бот играет на Chess.com в варианте **minihouse** и занял **1-е место в мировом рейтинге**:
+
+<div align="center">
+<img src="assets/screenshots/win_vs_top2.jpg" width="420" alt="Победа над бывшим №1" />
+
+*Победа над бывшим лидером 💪*
+</div>
+
+Движок тренируется ночами через самоигру, ежедневно улучшая дебютную книгу и оценочную функцию 📈
+
+## 🦀 Ключевые особенности движка
+
+Ядро движка написано на **Rust** (~3 300 строк кода) и подключается к Python через [PyO3](https://pyo3.rs):
+
+| Модуль | Строк | Что делает |
+|--------|-------|------------|
+| [`search.rs`](engine_rs/src/search.rs) | 1 011 | Параллельный alpha-beta с PVS, LMR, null-move pruning, aspiration windows |
+| [`gamestate.rs`](engine_rs/src/gamestate.rs) | 755 | Полная генерация ходов для 6×6 Crazyhouse (включая выставление фигур) |
+| [`eval.rs`](engine_rs/src/eval.rs) | 440 | Оценочная функция, настроенная под Crazyhouse (материал, безопасность короля, выставление) |
+| [`types.rs`](engine_rs/src/types.rs) | 331 | Представление доски и базовые типы |
+| [`cache.rs`](engine_rs/src/cache.rs) | 96 | Таблица транспозиций на SQLite (4M записей) |
+| [`zobrist.rs`](engine_rs/src/zobrist.rs) | 74 | Хеширование позиций |
+
+### 🔍 Возможности поиска
+
+- 🌀 **Итеративное углубление** (глубина 1 → 10) с aspiration windows
+- ⚡ **Параллельный поиск** — корневые ходы распределяются по потокам через Rayon
+- 🎯 **PVS + LMR** — Principal Variation Search с Late Move Reduction
+- 💥 **Поиск покоя (quiescence)** — взятия, превращения и тактические выставления вблизи вражеского короля
+- 🚫 **Null-move pruning** — автоматически отключается, когда у противника есть фигуры в руке
+- 💾 **Таблица транспозиций** — Zobrist хеширование, 4M записей, сохраняется в SQLite между сессиями
+
+### ⚖️ Оценочная функция
+
+| Фактор | Подробности |
+|--------|-------------|
+| Материал | P=100 · N=320 · B=330 · R=500 · Q=900 · K=20 000 |
+| Фигуры в руке | Ценятся на 60–100 % выше, чем на доске (мгновенное развёртывание) 🖐️ |
+| Безопасность короля | Пешечное прикрытие +55/пешка, открытый король — штраф до −390 🛡️ |
+| Контроль центра | +12 внутренний центр, +6 расширенный центр |
+| Угрозы выставления | Прогрессивный бонус, растущий с количеством фигур в руке 📈 |
+
+> Подробное описание → [`docs/evaluation_strategy.md`](docs/evaluation_strategy.md)
+
+## 🚀 Быстрый старт
+
+### 🔧 Предварительные требования
+
+- Тулчейн **Rust** (`rustup`)
+- Python 3.11+ (для GUI и бота)
+
+### 🎮 Сборка и запуск
+
+```bash
+git clone <repo-url> && cd MiniChess
+
+# Собрать движок на Rust
+cd engine_rs
+pip install maturin
+maturin develop --release
+cd ..
+
+# Установить Python-зависимости
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# Играть!
+./play.sh
+```
+
+### 🧠 Обучение через самоигру
+
+```bash
+./train.sh          # Ctrl+C для корректной остановки
+```
+
+### 🤖 Бот для Chess.com
+
+```bash
+cp .env.example .env   # добавьте свои учётные данные
+pip install -r requirements.txt
+python -m playwright install chromium
+
+./bot_start.sh casual  # или: rated
+./bot_stop.sh
+./monitor_bot.sh
+```
+
+> ⚠️ Убедитесь, что вы соблюдаете Условия использования Chess.com.
+
+## 🏗️ Архитектура
+
+```
+                    ┌──────────────────────────────┐
+                    │   minichess_engine (Rust)     │
+                    │                              │
+  ai.py ──PyO3──▶  │  search.rs ◄── eval.rs       │
+                    │      │           │            │
+                    │  gamestate.rs  zobrist.rs     │
+                    │      │                       │
+                    │  cache.rs (SQLite)            │
+                    └──────────────────────────────┘
+                              ▲
+      ┌───────────────────────┼────────────────────┐
+      │                       │                    │
+  main.py + gui.py      play_online.py       self_play.py
+  (Pygame GUI)          (Бот Chess.com)      (Обучение)
+```
+
+## 📂 Структура проекта
+
+```
+engine_rs/              ← Движок на Rust (ядро)
+  src/
+    search.rs           — параллельный alpha-beta + quiescence
+    eval.rs             — оценка позиции
+    gamestate.rs        — генерация ходов и состояние доски
+    types.rs            — базовые типы и представление доски
+    cache.rs            — таблица транспозиций на SQLite
+    zobrist.rs          — хеширование позиций
+    lib.rs              — точка входа модуля PyO3
+
+*.py                    ← Python-слой (GUI, бот, обучение)
+  ai.py                 — обёртка ИИ, делегирующая в Rust
+  gamestate.py          — правила игры и управление состоянием
+  gui.py                — отрисовка доски на Pygame
+  main.py               — точка входа игрового цикла
+  play_online.py        — браузерный бот для Chess.com
+  config.py / pieces.py / utils.py
+
+docs/                   ← Документация
+tests/                  ← Тесты
+```
+
+## 📖 Документация
+
+| Документ | Содержание |
+|----------|------------|
+| [Архитектура](docs/ARCHITECTURE.md) | Проектирование системы и взаимодействие компонентов |
+| [Стратегия оценки](docs/evaluation_strategy.md) | Подробные эвристики оценки |
+| [План улучшений](docs/IMPROVEMENTS.md) | Запланированные доработки |
+
+## 📝 Лицензия
+
+Частный проект.
+
+---
+
+<div align="center">
+
+*Создано с 🦀 Rust + 🐍 Python + ☕ литрами кофе*
 
 </div>
