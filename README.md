@@ -14,7 +14,7 @@
 
 [![Rust](https://img.shields.io/badge/Engine-Rust-b7410e?logo=rust&logoColor=white)](engine_rs/)
 [![PyO3](https://img.shields.io/badge/Bindings-PyO3-3776ab?logo=python&logoColor=white)](https://pyo3.rs)
-[![License](https://img.shields.io/badge/License-Private-grey)]()
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 <br>
 
@@ -174,7 +174,7 @@ tests/                  ← Test suite
 
 ## 📝 License
 
-Private project.
+[MIT License](LICENSE) — free to use, modify, and distribute.
 
 ---
 
