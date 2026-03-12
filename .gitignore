@@ -48,6 +48,10 @@ engine_rs/target/
 # Article drafts & screenshots
 habr*
 *_consolidated.md
+devto-article-en.md
+
+# Outreach letters (private)
+docs/outreach-*.md
 
 # Screenshots in root
 top1_*.jpg
