@@ -64,17 +64,15 @@ def _parse_account_args():
     parser.add_argument('--password', default=os.getenv('CHESS_COM_PASSWORD'))
     parser.add_argument('--account', default=None, help='Account tag for separate profile dirs')
     parser.add_argument('--auto', action='store_true')
+    parser.add_argument('--games', type=int, default=None, help='Max number of games to play (auto mode)')
     args, _ = parser.parse_known_args()
     
     # Validate credentials are provided
     if not args.email or not args.password:
-        print("❌ Chess.com credentials not provided!")
-        print("   Set CHESS_COM_EMAIL and CHESS_COM_PASSWORD in .env file")
-        print("   OR pass --email and --password as CLI arguments")
-        print("\n   Example .env file:")
-        print("   CHESS_COM_EMAIL=your-email@gmail.com")
-        print("   CHESS_COM_PASSWORD=your-password")
-        sys.exit(1)
+        print("⚠️  Chess.com credentials not provided (will rely on saved Chrome session)")
+        print("   If login fails, set CHESS_COM_EMAIL/CHESS_COM_PASSWORD in .env")
+        args.email = args.email or ""
+        args.password = args.password or ""
     
     return args
 
@@ -1711,12 +1709,15 @@ def create_minihouse_game(page, rated=False):
     return True
 
 
-def auto_loop(page):
-    """Infinite loop: create game → wait → play → repeat."""
+def auto_loop(page, max_games=None):
+    """Loop: create game → wait → play → repeat. Stops after max_games if set."""
     game_num = 0
 
     while True:
         game_num += 1
+        if max_games is not None and game_num > max_games:
+            print(f"\n✅ Completed {max_games} games. Stopping.")
+            return
         heartbeat("seeking", f"game={game_num}")
         print(f"\n{'╔' + '═' * 48 + '╗'}")
         print(f"║  GAME #{game_num:03d}                                        ║")
@@ -1759,7 +1760,7 @@ def auto_loop(page):
         time.sleep(5)
 
 
-def run_auto_session():
+def run_auto_session(max_games=None):
     """Single auto-session: connect → detect state → play. Returns on crash."""
     print("\n📦 Loading move cache...")
     setup_db()
@@ -1805,17 +1806,19 @@ def run_auto_session():
             print(f"\n🆕 No active game. URL: {current_url}")
 
         # After game (or no game) → auto-loop
-        auto_loop(page)
+        auto_loop(page, max_games=max_games)
 
 
 def main():
     """Entry point — supports --auto for fully autonomous mode."""
     auto_mode = _acct.auto
+    max_games = _acct.games
 
     print("╔══════════════════════════════════════════════╗")
     print("║   MiniChess Bot — chess.com/minihouse        ║")
     if auto_mode:
-        print("║   Mode: FULL AUTO (with auto-restart)        ║")
+        games_info = f" ({max_games} games)" if max_games else ""
+        print(f"║   Mode: FULL AUTO{games_info:<28}║")
     else:
         print("║   Mode: Interactive CLI                       ║")
     print("╚══════════════════════════════════════════════╝")
@@ -1827,7 +1830,7 @@ def main():
             restart_count += 1
             try:
                 print(f"\n{'🔄' if restart_count > 1 else '🚀'} Session #{restart_count}")
-                run_auto_session()
+                run_auto_session(max_games=max_games)
             except KeyboardInterrupt:
                 print("\n⏹️  Stopped by user")
                 break
